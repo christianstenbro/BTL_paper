@@ -1,0 +1,650 @@
+---
+title: "prolific_nationalities"
+author: "Christian Stenbro"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 1. Set-up
+
+## 1.1 Setting up packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse, janitor, rdist, GFE)
+```
+
+## 1.2 Loading data and pre-processing
+
+Loading the list of nationalities available from prolific, including the participant pool size for each of the demographic groups. This list was compiled by adding all nationalities to the quota sample in prolific and copy-pasting the pool-size information. The information was recorded on 05-11-2024, between 16:00 and 16:15.
+
+```{r}
+# loading data
+prolific_nationalities <- read_csv("/Users/christianstenbro/AU/BSc/representative_sample/prolific_demographics_pool_size_05_11_2024_16_10.csv")
+
+# cleaning column names
+prolific_nationalities <- janitor::clean_names(prolific_nationalities)
+
+# removing commas separating thousands in the pool_size column and changing <25 coding (notice the invisible dot)
+prolific_nationalities$pool_size <- gsub(",", "", prolific_nationalities$pool_size)
+prolific_nationalities$pool_size <- gsub("Fewer than 25", "<25", prolific_nationalities$pool_size)
+
+# selecting the relevant columns
+prolific_nationalities <- prolific_nationalities %>% 
+  select(demographic, pool_size)
+```
+
+# 2. Data processing
+
+## 2.1 Filtering data according to participant pool size exclusion criteria
+
+In Prolific, some nationality groups have fewer than 25 participants. I will start by excluding these from the sample, as they have to few participants to collect a meaningful sample from. Practically, data collection would also become incredibly slow with such a low number of participants.
+
+```{r}
+# excluding nationality groups with fewer than 25 participants
+prolific_nationalities_subset <- prolific_nationalities %>% 
+  filter(pool_size != "<25")
+
+cat("Before filtering: ", nrow(prolific_nationalities), "nationalities. ", "After filtering:", nrow(prolific_nationalities_subset), "nationalities.")
+```
+
+This leaves us with 94 out of 246 nationalities.
+To increase the feasibility of obtaining enough participants from each country, nation groups with less than 200 participants are excluded.
+
+```{r}
+# converting pool_size column to numeric
+prolific_nationalities_subset$pool_size <- as.numeric(prolific_nationalities_subset$pool_size)
+
+# filtering out participants pool with fewer than 140 participants
+participant_threshold <- 200
+
+prolific_nationalities_subset <- prolific_nationalities_subset %>% 
+  filter(pool_size >= participant_threshold)
+
+cat("After filtering:", nrow(prolific_nationalities_subset), "nationalities.")
+```
+
+We can now look at the distribution of participants in the remaining countries:
+
+```{r}
+prolific_nationalities_subset_2 <- prolific_nationalities_subset %>% filter(demographic != "United Kingdom" & demographic != "United States")
+
+colors = prolific_nationalities_subset_2$demographic
+
+plot(x = prolific_nationalities_subset_2$pool_size, col = seq_along(colors), pch = 16)
+legend("topright", legend = colors, pch = 16, col = seq_along(colors), cex = 0.5)
+```
+
+## 2.2 Merging filtered data with the WALS countries dataframe
+
+The WALS contain information about the different languages of the world. The countries and languages making up the WALS is divided into 6 macro/continental areas. For the present project, the sample will be constructed based on this division. 
+
+I will import two csv files from the WALS CLDF: *countries* and *languages*. 
+
+```{r}
+# loading language and country data from the WALS CLDF
+languages <- read.csv("/Users/christianstenbro/AU/BSc/representative_sample/cldf-datasets-wals-0f5cd82/cldf/languages.csv")
+countries <- read.csv("/Users/christianstenbro/AU/BSc/representative_sample/cldf-datasets-wals-0f5cd82/cldf/countries.csv")
+
+# changing column names to lower case
+languages <- janitor::clean_names(languages)
+countries <- janitor::clean_names(countries)
+
+# renaming columns in the data frames to be more explicit
+countries <- countries %>% rename("country_id" = id, "country_name" = name)
+languages <- languages %>% rename("language_id" = id, "language_name" = name)
+
+# checking column names and assessing data frames
+head(languages)
+head(countries)
+```
+
+The first step is to merge the WALS *countries* with the filtered Prolific data:
+
+```{r}
+# renaming *demographics* column to enable merging
+prolific_nationalities_subset <- prolific_nationalities_subset %>% rename("country_name" = demographic)
+
+# merging data
+prolific_wals_countries <- merge(prolific_nationalities_subset, countries, by = "country_name", all.x = TRUE)
+
+# finding nationalities in the prolific database without an immediate WALS country match:
+prolific_wals_countries %>% filter(is.na(prolific_wals_countries$country_id) == TRUE)
+```
+
+By looking through the *countries.csv*, the following re-coding is suggested:
+
+country_name_in_prolific                reencoded_country_name      reencoded_country_id
+  
+Hong Kong ✝                             *Hong Kong*                 *HK*
+Korea *                                 North Korea / South Korea   KR KP	
+Puerto Rico ✝                           *Puerto Rico*               *PR*
+Russian Federation **                   Russia                      RU
+Singapore ✝                             *Singapore*                 *SG*
+Venezuela, Bolivarian Republic of ***   Venezuela                   VR
+
+✝ For countries/demographic groups without any match in the WALS database, the iso 3166-1 alpha 2 code will be added: https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2. Update: Countries not figuring in the WALS database will be excluded as the macroarea grouping used for the statistical analysis is based on WALS.
+
+* According to WALS, there is a single non-sign language called Korean which is spoken in both North Korea and South Korea. Similarly, both North Korea and South Korea belong to the same geographical grouping in the WALS. The re-coding of Korea to North Korea / South Korea here is thus an arbitrary choice, and it does not change anything from an information point of view.
+
+** Different name in the WALS country data: Russia
+
+*** Different name in the WALS country data: Venezuela
+
+Comment: Since the WALS database will be used to divide the countries into continent, it will also be necessary to append a continent grouping to the countries/areas in Prolific that have no match in the WALS.
+
+```{r}
+# adding new country name and country id columns
+prolific_wals_countries <- prolific_wals_countries %>% mutate(reencoded_country_name = country_name, .after = country_name)
+
+# re-encoding countries according to the above scheme
+prolific_wals_countries[prolific_wals_countries$country_name == 'Korea',]$reencoded_country_name <- 'North Korea / South Korea'
+prolific_wals_countries[prolific_wals_countries$country_name == 'Korea',]$country_id <- 'KR KP'
+
+prolific_wals_countries[prolific_wals_countries$country_name == 'Korea',]$reencoded_country_name <- 'North Korea / South Korea'
+prolific_wals_countries[prolific_wals_countries$country_name == 'Korea',]$country_id <- 'KR KP'
+
+prolific_wals_countries[prolific_wals_countries$country_name == 'Russian Federation',]$reencoded_country_name <- 'Russia'
+prolific_wals_countries[prolific_wals_countries$country_name == 'Russian Federation',]$country_id <- 'RU'
+
+# prolific_wals_countries[prolific_wals_countries$country_name == 'Venezuela, Bolivarian Republic of',]$reencoded_country_name <- 'Venezuela'
+# prolific_wals_countries[prolific_wals_countries$country_name == 'Venezuela, Bolivarian Republic of',]$country_id <- 'VR'
+
+# excluding countries not in the WALS data base
+prolific_wals_countries <- prolific_wals_countries %>% 
+  filter(!country_name %in% c("Hong Kong","Puerto Rico","Singapore"))
+
+# checking that everything worked
+prolific_wals_countries %>% filter(is.na(prolific_wals_countries$country_id) == TRUE)
+```
+
+## 2.3 Merging data with the WALS languages dataframe
+
+The next step is to combine the merged data with the WALS languages data frame. 
+
+This new merge will append information about different languages to the data frame for each country. In the language data frame, these languages (and the country ID with which they are tabulated) are divided between six macro areas. The result is that the nation groups from Prolific will be divided between these macro areas as well.
+
+The merge is made using the country_id variable.
+
+```{r}
+# merging data frames
+prolific_wals_combined <- merge(prolific_wals_countries, languages, all.x = TRUE, by = "country_id")
+
+# checking dimensions of the new data frame
+cat("Dimensions:", dim(prolific_wals_combined))
+```
+This inflates the data frame, because many countries have multiple languages assigned.
+
+```{r}
+# checking for missing matches
+prolific_wals_combined %>% filter(is.na(prolific_wals_combined$language_name) == TRUE)
+```
+
+The only missing match is Croatia. In the WALS languages data base, the language of Croatia is coded as Serbian-Croatian, and the country ID associated with this field is: 'RS BA HR'. Hence, I will re-code Croatia in the *prolific_wals_countries* data frame and re-merge:
+
+```{r}
+# re-coding Croatia's country ID
+prolific_wals_countries[prolific_wals_countries$country_name == 'Croatia',]$country_id <- 'RS BA HR'
+
+# re-merging the data with the WALS languages data
+prolific_wals_combined <- merge(prolific_wals_countries, languages, by = "country_id", all.x = TRUE)
+
+# checking dimensions of the new data frame
+cat("Dimensions:", dim(prolific_wals_combined))
+
+# checking the new code for Croatia
+prolific_wals_combined[prolific_wals_combined$country_name == 'Croatia',]
+```
+Before continuing, I will remove all languages in the 'Sign Languages' genus.
+
+Additionally, I will remove the Faroese language, currently grouped under Denmark, as the Faroe Islands were excluded earlier due to having less than 100 participants:
+
+```{r}
+prolific_wals_combined <- prolific_wals_combined %>% filter(genus != "Sign Languages")
+
+prolific_wals_combined <- prolific_wals_combined %>% filter(language_name != "Faroese")
+```
+
+
+Finally, some countries have languages that are grouped under different regions. This will be resolved by the following principle: The country will be grouped under the macroarea with the most languages pr. country:
+
+```{r}
+# identify countries with multiple group membership
+multiple_membership <- prolific_wals_combined %>% 
+  group_by(country_name) %>% 
+  summarise(length(unique(macroarea))>1)
+
+multiple_membership <- multiple_membership %>% 
+  filter(`length(unique(macroarea)) > 1` == TRUE)
+
+multiple_membership
+```
+Now, the most popular grouping is computed:
+
+```{r}
+# computing the max count macroarea with add count and removing the entries for countries where the macroarea coding doesn't correspond to this macroarea
+prolific_wals_combined <- prolific_wals_combined %>% 
+  group_by(country_name) %>% 
+  add_count(country_name, macroarea, name = "macroarea_frequency") %>%
+  slice_max(macroarea_frequency, with_ties = TRUE) %>%
+  ungroup()
+
+# testing
+prolific_wals_combined %>% 
+  group_by(country_name) %>% 
+  summarise(macroarea_count = n_distinct(macroarea)) %>% 
+  filter(macroarea_count > 1)
+```
+
+```{r}
+prolific_wals_combined
+```
+
+
+# 3. Demographic diversity
+
+## 3.1 Checking initial diversity
+
+```{r}
+# initially disregarding language information, the division of Prolific nationalities between the six macro areas is tabulated:
+prolific_wals_sliced <- prolific_wals_combined %>% group_by(country_name) %>% 
+  slice_sample(n=1) %>% 
+  ungroup
+
+table(prolific_wals_sliced$macroarea)
+```
+
+At least one country from each geographic macro area is represented, which is positive.
+
+## 3.2 Limiting the number of countries from macroareas with many countries
+
+To limit the number of countries within Eurasia, a geographical approach is used to maximise the distance between the included countries.
+
+### 3.2.a Adding centroid data
+
+First, country centroids are appended to the data. The centroids are downloaded from the *catalogue-of-centroids* GitHub repository.
+
+```{r}
+# reading data
+centroids <- read.csv("/Users/christianstenbro/AU/BSc/representative_sample/country_data/world-countries-centroids/countries.csv")
+
+# lowercasing names and renaming to enable merge
+centroids <- janitor::clean_names(centroids)
+
+centroids <- centroids %>% rename(country_name = "country")
+
+# removing latitude and longitude data from the prolific_wals_combined data frame (this is place specific to different languages and is not suitable for the algorithmic selection)
+prolific_wals_combined <- prolific_wals_combined %>% select(-latitude, -longitude)
+
+# merging with the nation data
+prolific_wals_centroids <- merge(prolific_wals_combined, centroids, all.x = TRUE, by = "country_name")
+
+# checking for missing matches
+prolific_wals_centroids %>% filter(is.na(prolific_wals_centroids$latitude) == TRUE) %>%
+  group_by(country_name) %>% 
+  slice_sample(n=1) %>% 
+  ungroup
+```
+
+These missing matches will be re-coded to find a match in the centroids data base.
+
+- Coordinates for Korea will be calculated as the mean of latitudes and longitudes of North Korea and South Korea (both of which are present in the centroid data set). Unfortunately, it is not possible to determine whether Korea in Prolific refers to North or South Korea.
+
+- 'Venezuela, Bolivarian Republic of' will be re-coded as 'Venezuela', which is present in the Centroids data
+
+```{r}
+# creating empty dataframe to use as new row in the centroid database
+Korea <- centroids[FALSE,]
+
+# defining variables
+sk_long <- centroids[centroids$country_name == 'South Korea','longitude']
+sk_lat <- centroids[centroids$country_name == 'South Korea','latitude']
+nk_long <- centroids[centroids$country_name == 'North Korea','longitude']
+nk_lat <- centroids[centroids$country_name == 'North Korea','longitude']
+
+# creating a new row
+Korea <- rbind(Korea, data.frame(longitude = mean(sk_long, nk_long), 
+                                 latitude = mean(sk_lat, nk_lat), 
+                                 country_name = "Korea",
+                                 iso = NA, 
+                                 countryaff = NA,
+                                 aff_iso = NA))
+
+# appending to the centroids data
+centroids <- rbind(centroids, Korea)
+
+# re-coding Venezuela in the prolific_wals_combined data frame
+prolific_wals_combined[prolific_wals_combined$country_name == "Venezuela, Bolivarian Republic of",]$country_name <- 'Venezuela'
+
+# remerging prolific/wals and centroid data
+prolific_wals_centroids <- merge(prolific_wals_combined, centroids, all.x = TRUE, by = "country_name")
+```
+
+Now, all countries in the sample can be plotted on a map:
+
+```{r}
+# filter out a single language pr. country
+prolific_wals_centroids_subset <- prolific_wals_centroids %>% 
+  group_by(country_name) %>% 
+  slice_sample(n=1) %>% 
+  ungroup
+
+# plotting all countries to see the result
+world_coordinates <- map_data("world") 
+
+ggplot() + 
+  geom_map( 
+    data = world_coordinates, map = world_coordinates, 
+    aes(long, lat, map_id = region), 
+    color = "lightblue", fill= "lightyellow") + 
+
+geom_point( 
+    data = prolific_wals_centroids_subset, 
+    aes(longitude, latitude, color = country_name, size=2), 
+    alpha = 0.7) + 
+
+geom_text(
+  aes(prolific_wals_centroids_subset$longitude, prolific_wals_centroids_subset$latitude, label = prolific_wals_centroids_subset$country_name), 
+  size = 1,
+  check_overlap = FALSE) +
+
+theme(legend.position="none")
+```
+### 3.2.b Coding countries in Europe and Asia by continent
+
+First, a new Eurasia subset is created (with only a single language pr. country):
+
+```{r}
+eurasia <- prolific_wals_centroids %>% 
+  filter(macroarea == "Eurasia") %>% 
+  group_by(country_name) %>% 
+  slice_sample(n=1) %>% 
+  ungroup()
+```
+
+Then, the spatial diversity across the Eurasian continent is maximised using a *farthest_point_sampling* algorithm with a random starting point. 
+
+To reach an acceptable minimum level of statistical power on the level of the individual country (which would be necessary to catch meaningful variation on this level with some degree of accuracy), it is decided that each country should have at least 50 participants. 
+This limits the number of countries from Eurasia to the following:
+
+```{r}
+continent_number <- 6
+total_participants <- 2000
+min_participants_pr_country <- 50
+
+participants_pr_continent = total_participants / continent_number
+countries_pr_continent = participants_pr_continent %/% min_participants_pr_country # integer division
+
+cat("Max countries pr. continent = ", countries_pr_continent)
+```
+
+One dilemma is whether to approach Eurasia as two or one continents. For now, I will include them as a single continent.
+
+```{r}
+# setting random seed
+set.seed(2024)
+
+# setting up algorithm
+mat <- eurasia %>% select(latitude,longitude)
+
+index <- farthest_point_sampling(
+  pdist(mat),
+  metric = "precomputed",
+  k = 6,
+  #initial_point_index = 1L, #using a random starting point
+  return_clusters = FALSE
+)
+
+# assembling a new sample based on the algorithmic sampling
+fps_sample_eurasia <- eurasia[FALSE,]
+
+for (i in 1:length(index)){
+  fps_sample_eurasia <- rbind(fps_sample_eurasia, eurasia[index[i],])
+}
+
+# plotting the new sample
+world_coordinates <- map_data("world") 
+
+ggplot() + 
+  geom_map( 
+    data = world_coordinates, map = world_coordinates, 
+    aes(long, lat, map_id = region), 
+    color = "lightblue", fill= "lightyellow"
+  ) + 
+geom_point( 
+    data = fps_sample_eurasia, 
+    aes(longitude, latitude, color = country_name, 
+        size=4), 
+    alpha = 0.7) + 
+
+  geom_text(aes(fps_sample_eurasia$longitude, fps_sample_eurasia$latitude, label = fps_sample_eurasia$country_name), size = 1,
+            check_overlap = FALSE) +
+
+theme(legend.position="none") 
+```
+
+## 3.3 Composing final sample
+
+The subset of countries selected from Eurasia is now used to filter out excluded countries in the prolific_wals_centroids data frame:
+
+```{r}
+# making a slice sample to have a single row pr. country. Unused columns are also removed.
+prolific_wals_centroids_countries <- prolific_wals_centroids %>% 
+  group_by(country_name) %>% 
+  slice_sample(n=1) %>%
+  select(country_name, country_id, pool_size, macroarea, longitude, latitude) %>% 
+  ungroup()
+
+# excluding countries from Eurasia and Africa not in the selected sample from 3.2.b
+prolific_sample <- prolific_wals_centroids_countries %>%
+  filter(!(macroarea=="Eurasia" & !(country_name %in% fps_sample_eurasia$country_name)))
+
+# checking number of countries in the final sample
+nrow(prolific_sample)
+```
+
+```{r}
+# plotting the sample
+world_coordinates <- map_data("world") 
+
+sample_plot <- ggplot() + 
+  geom_map( 
+    data = world_coordinates, map = world_coordinates, 
+    aes(long, lat, map_id = region), 
+    color = "lightblue", fill= "lightyellow"
+  ) + 
+geom_point( 
+    data = prolific_sample, 
+    aes(longitude, latitude, color = macroarea, 
+        size=4), 
+    alpha = 0.7) + 
+
+  geom_text(aes(prolific_sample$longitude, prolific_sample$latitude, label = prolific_sample$country_name), size = 1,
+            check_overlap = FALSE) +
+guides(size = "none") +
+  scale_color_brewer(palette = "Set2") +
+theme(legend.position=c(0.1,0.4), margin(4,4,4,4))
+
+# saving to png
+ggsave("sample_plot_v3.png", plot = sample_plot, width = 4200 / 600, height = 3000 / 600, units = "in", dpi = 600)
+
+# plotting
+sample_plot
+```
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+
+world_coordinates <- map_data("world")
+
+sample_plot <- ggplot() +
+  geom_map(
+    data = world_coordinates, map = world_coordinates,
+    aes(long, lat, map_id = region),
+    color = "lightblue", fill = "lightyellow"
+  ) +
+  geom_point(
+    data = prolific_sample,
+    aes(longitude, latitude, color = macroarea, size = 4),
+    alpha = 1
+  ) +
+  geom_text(
+    data = prolific_sample,
+    aes(longitude, latitude, label = country_name),
+    size = 1.5,
+    check_overlap = FALSE
+  ) +
+  guides(size = "none") +  # Remove size from the legend
+  scale_color_brewer(palette = "Set2") +  # Apply color palette
+  theme(
+    panel.background = element_blank(),  # Blank background
+    panel.grid = element_blank(),        # Remove grid lines
+    axis.line = element_blank(),         # Remove axis lines
+    axis.ticks = element_blank(),        # Remove axis ticks
+    axis.text = element_blank(),         # Remove axis text
+    legend.position = c(0.1, 0.4),       # Place legend on the plot
+    legend.background = element_rect(fill = "white", color = "black"),
+    legend.key = element_blank(),
+    plot.margin = margin(4, 4, 4, 4)
+  ) +
+  ggtitle("Geographic Distribution of Participant Sample with 21 Nations")
+
+# Save to PNG
+ggsave("sample_plot_v3_clean.png", plot = sample_plot, width = 4200 / 600, height = 3000 / 600, units = "in", dpi = 600)
+
+# Plot
+sample_plot
+
+```
+
+
+This is the final sample for option 1, in which Eurasia forms a single statistical group. This alignment largely follows Dryer's classification (after the adjustment of the countries with multiple membership).
+
+## 3.4 Computing quota percentages
+
+The final step is to compute quota percentages.
+
+```{r}
+# computing number of countries pr. macro area
+countries_pr_continent <- prolific_sample %>% 
+  group_by(macroarea) %>% 
+  summarise(country_count = n_distinct(country_name)) %>% 
+  ungroup()
+  
+# defining variables
+total_participants <- 2000
+number_of_macroareas <- 6
+participants_pr_macroarea <- total_participants / number_of_macroareas
+
+# computing quota pr country while securing balance on the macro area level
+countries_pr_continent <- countries_pr_continent %>% 
+  mutate(percentage_pr_country = participants_pr_macroarea/country_count/total_participants,
+         percentage_entire_macroarea = percentage_pr_country*country_count)
+
+countries_pr_continent
+
+# this should sum to 1
+sum(countries_pr_continent$percentage_entire_macroarea)
+```
+
+
+```{r}
+# setting random seed
+set.seed(2024)
+
+# defining lists to build data structure
+rounded_percentages <- list()
+macroarea_name <- list()
+
+# setting up loop to get the final percentage quotas
+for (i in 1:nrow(countries_pr_continent)){
+
+  # computing rounded percentages on the country level that still sums to 1/6
+  rounded_percentages[[i]] <- round_preserve_sum(
+    rep(
+      countries_pr_continent$percentage_pr_country[i], 
+      countries_pr_continent$country_count[i]
+      ), 
+    digits = 3)
+  
+  # shuffling the numbers
+  rounded_percentages[[i]] <- sample(rounded_percentages[[i]])
+  
+  # constructing list of macroarea names
+  macroarea_name[[i]] <- rep(countries_pr_continent$macroarea[i], 
+                             countries_pr_continent$country_count[i])
+  
+  }
+
+# unlisting into a single layer object
+rounded_percentages <- unlist(rounded_percentages)
+macroarea_name <-  unlist(macroarea_name)
+
+quota_list <- data_frame(macroarea_name,rounded_percentages)
+
+# checking the sum of rounded percentages
+sum(quota_list$rounded_percentages)
+```
+
+We are 0.002 short of the target. I will manually adjust the largest group (Australia), to make sure the overall sample percentages add up to 1.
+
+```{r}
+# adjusting the quota for Australia manually
+quota_list[quota_list$macroarea_name=="Australia", 2] <- quota_list[quota_list$macroarea_name=="Australia", 2]-0.002 
+
+# renaming variables
+quota_list <- quota_list %>% rename(participant_quota = "rounded_percentages")
+
+# checking sum of the participant quota column
+sum(quota_list$participant_quota)
+```
+
+Now, the quotas can be added to the prolific sample:
+
+```{r}
+# sorting both lists to make sure macro areas align
+prolific_sample_sorted <- prolific_sample %>% arrange(macroarea)
+quota_list_sorted <- quota_list %>% arrange(macroarea_name)
+
+# distributing the set of percentages randomly within their macro areas
+prolific_sample_quotas <- cbind(prolific_sample_sorted, quota_list_sorted)
+
+# printing sample
+prolific_sample_quotas
+```
+
+Now, we can compute the estimated number of participant from each country in the list. The list is also sorted alphabetically to ease selection in the Prolific interface:
+
+```{r}
+# adding a new column with quota percentages summing to 100 + an expected participant number column
+prolific_sample_quotas <- prolific_sample_quotas %>% mutate(participant_quota_percentage = participant_quota*100, participant_number = 2000*participant_quota) %>% arrange(country_name)
+
+prolific_sample_quotas
+```
+```{r}
+prolific_sample_quotas %>% group_by(macroarea) %>% arrange(by = macroarea)
+```
+
+
+This sample list is saved as a csv file:
+
+```{r}
+write_csv(prolific_sample_quotas, "prolific_sample_quotas_v3_copy.csv")
+```
+
+
+```{r}
+# testing that everything adds up
+prolific_sample_quotas %>% group_by(macroarea) %>% summarise(sum(participant_quota_percentage))
+```
+
+
+
+
+
+
+

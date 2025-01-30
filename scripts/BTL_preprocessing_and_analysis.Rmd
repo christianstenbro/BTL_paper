@@ -1,0 +1,2903 @@
+---
+title: "data_import_test"
+author: "Christian Stenbro"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 0. Set-up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse,
+               rjson,
+               circular,
+               rethinking, 
+               widyr,
+               ggthemes,
+               betareg,
+               lsa,
+               sf,
+               geosphere,
+               extraDistr,
+               bayesplot)
+```
+
+# 1. Loading data
+
+```{r}
+# change these to the correct paths if running on a different system
+
+# loading Otree experiment data downloaded from the social cognition server
+BTL_practice <- read_csv("/Users/christianstenbro/AU/BSc/data/BTL_practice_2025-01-06.csv")
+BTL <- read_csv("/Users/christianstenbro/AU/BSc/data/BetweenTheLines_2025-01-06.csv")
+
+# loading the demographic data downloaded from Prolific
+prolific <- read_csv("/Users/christianstenbro/AU/BSc/data/prolific_export_06_01_2025_671fc245c729e00b501ead56.csv")
+
+# loading the .csv file created with the sample creation script, containing geographic data
+prolific_geography <- read_csv("/Users/christianstenbro/AU/BSc/data/prolific_sample_quotas_v3.csv")
+```
+
+# 2. Understanding the data structure
+
+```{r}
+# filtering the relevant participant labels in the practice round:
+BTL_practice <- BTL_practice %>% filter(participant.label != "NA")
+
+# the participant label is also in this one - fantastic!
+BTL <- BTL %>% filter(participant.label != "NA")
+
+# filtering for session
+colnames(BTL)
+all_participants <- unique(BTL$participant.label)
+all_participants[200]
+```
+
+
+The data is organised by sessions and rounds. This means that sessions 1 will contain data for each individual participant for each consecutive round. But we can always just sort by participant:
+
+```{r}
+# loading data for one particular participant
+BTL_participant_4 <- BTL %>% 
+  arrange(participant.label) %>% 
+  filter(participant.label == "5df1a3387caa1e0c69dca179")
+
+# playing around with the data format
+fromJSON(BTL_participant_4$player.angleData[2])
+fromJSON(BTL_participant_4$player.startPosData[2])
+
+# looking at the image
+BTL_participant_4$player.drawing[6]
+```
+
+```{r}
+# loading practice data from that participant
+BTL_practice_participant <- BTL_practice %>% 
+  arrange(participant.label) %>% 
+  filter(participant.label == "5df1a3387caa1e0c69dca179")
+
+# playing around with the data format
+angle <- fromJSON(BTL_practice_participant$player.angleData[1])
+fromJSON(BTL_practice_participant$player.startPosData[1])
+
+# looking at the image
+BTL_practice_participant$player.drawing[1]
+```
+
+# 3. Converting line angle data to radians
+
+In order to plot the raw angle data, it is first converted to radians. Currently, it has a radian-like format, but instead of the range from 0 to 2π, it ranges from -π to π. Additionally, unlike radians that conventionally increase in the counter clockwise direction, starting from 0 at the horizontal line and ending at 2π, the current angle format increases clockwise. Thus the following transformations are made:
+
+1. The signs of all data point are flipped (by multiplying with -1). This means that the angles on the upper half of the 'clock' will now correspond to their radian value.
+
+2. For data points x where x < 0, the sign of x is flipped once again and the result is subtracted from 2π. This transforms the angle to the radian space.
+
+```{r}
+# flipping all signs
+
+flipped_angles <- list()
+
+for (i in 1:length(angle)){
+  flipped_angles[i] <- angle[[i]] * -1
+}
+
+# transforming negative angles to radian space
+radians <- list()
+
+for (i in 1:length(flipped_angles)){
+  if (flipped_angles[[i]] < 0){
+    radians[i] <- (2 * pi) - (flipped_angles[[i]] * -1)
+  }
+  else {
+    radians[i] <- flipped_angles[[i]]
+  }
+}
+
+radians <- unlist(radians)
+```
+
+```{r}
+# the data can now be plotted using tools from the circular package in R
+
+# converting the data to circular data
+radians <- as.circular( radians, units="radians", zero = 0, rotation = c("counter", "clock") )
+
+# plotting the angles on a circle
+plot(radians, stack=TRUE, bins=150) 
+
+# Shrink the plot so that all points fit.
+#plot(radians, stack=TRUE, bins=150, shrink=1.5) 
+
+# Recentering the figure in a different place
+#plot(radians, stack=TRUE, bins=150, xlim=c(-1,1.2), ylim=c(-1,0)) 
+
+```
+
+This achieves a different representation of the angles of each line for a given participant in a given round.
+
+Let's try to expand this to all lines in the practice rounds:
+
+```{r}
+# removing data points for participants that did not reach the goodbye page
+BTL_practice_cleaned <- BTL_practice %>% filter(participant._current_page_name == "Goodbye")
+
+# selecting the relevant columns
+BTL_practice_angles <- BTL_practice_cleaned %>% select(participant.label, player.angleData)
+
+# doing sanity checks
+nrow(BTL_practice_angles)
+length(unique(BTL_practice_angles$participant.label))
+```
+
+First, a list of all angles unpacked from their respective nesting is computed:
+
+```{r}
+raw_angles <- list()
+
+for ( i in 1:nrow(BTL_practice_angles) ){
+  raw_angles[i] <- list( fromJSON( BTL_practice_angles$player.angleData[[i]] ) )
+  
+}
+
+raw_angles <- unlist(unname(unlist(unname(raw_angles))))
+```
+
+Then, the angles are transposed to radians using a similar method as previously:
+
+```{r}
+# flipping all signs
+
+flipped_angles <- list()
+
+for (i in 1:length(raw_angles)){
+  flipped_angles[i] <- raw_angles[[i]] * -1
+}
+
+# transforming negative angles to radian space
+radians <- list()
+
+for (i in 1:length(flipped_angles)){
+  if (flipped_angles[[i]] < 0){
+    radians[i] <- (2 * pi) - (flipped_angles[[i]] * -1)
+  }
+  else {
+    radians[i] <- flipped_angles[[i]]
+  }
+}
+
+radians <- unlist(radians)
+```
+
+The radians are plotted:
+
+```{r}
+# converting the data to circular data
+radians <- as.circular( radians, units="radians", zero = 0, rotation = c("counter", "clock") )
+
+# plotting
+plot(radians, stack=TRUE, bins=360*10, shrink=1.5, 
+     cex = 0.5, col=col.alpha( rangi2,0.05 ), 
+     main = "Angle data from practice rounds, converted to radians",
+     cex.main = 2) 
+
+# could be cool to plot the density as well
+dens(as.numeric(radians))
+
+# The distribution is, essentially, bimodal; this is somewhat obscured by the density plot, which shows the peak around 0 and 2pi as two distinct peak, when they are really one!
+```
+
+If this is not due to some kind of mistake, the visualization shows very distinct peaks at angles corresponding to the Cartesian axes. Specifically large peaks are around r = 0 and r = 3π/2, corresponding to a horizontal line drawn from left to right; and a vertical line drawn from top to bottom.
+
+```{r}
+# 1 degree precision treshold in radians
+precision_treshold <- 1/360*2*pi
+
+is_angle_zero <- as.numeric(radians) <= precision_treshold
+
+is_angle_zero <- tibble(is_angle_zero)
+
+is_angle_zero %>% filter(is_angle_zero == TRUE)
+```
+
+1 degree = 1 * pi/180 * radians
+
+# 4 Computing features
+
+## 4.1 Pre-processing - creating angle matrix
+
+Removing rows from internal testing:
+
+```{r}
+# selecting the relevant columns
+BTL_angles <- BTL %>% select(participant.label, player.angleData, participant._current_page_name)
+
+# grouping by participant label
+BTL_angles <- BTL_angles %>% group_by(participant.label)
+
+# removing data from internal tests of the experimental platform
+test_labels <- c("pilot_a", "pilot_b", "pilot_c", "pilot_d", "test_1", "test_2", "test_3", "test_4")
+BTL_angles <- BTL_angles %>% filter(!(participant.label %in% test_labels))
+
+# removing data points for participants that did not reach the goodbye page
+BTL_angles <- BTL_angles %>% filter(participant._current_page_name == "Goodbye")
+
+# removing the current_page_name column 
+BTL_angles <- BTL_angles %>% select(-participant._current_page_name)
+```
+
+```{r}
+# checking the size of this sample
+
+n_distinct(BTL_angles$participant.label)
+```
+
+
+Plotting the data:
+
+```{r}
+raw_angles <- list()
+
+for ( i in 1:nrow(BTL_angles) ){
+  raw_angles[i] <- list( fromJSON( BTL_angles$player.angleData[[i]] ) )
+}
+
+raw_angles <- unlist(unname(unlist(unname(raw_angles))))
+```
+
+Then, the angles are transposed to radians using a similar method as previously:
+
+```{r}
+# flipping all signs
+
+flipped_angles <- list()
+
+for (i in 1:length(raw_angles)){
+  flipped_angles[i] <- raw_angles[[i]] * -1
+}
+
+# transforming negative angles to radian space
+radians <- list()
+
+for (i in 1:length(flipped_angles)){
+  if (flipped_angles[[i]] < 0){
+    radians[i] <- (2 * pi) - (flipped_angles[[i]] * -1)
+  }
+  else {
+    radians[i] <- flipped_angles[[i]]
+  }
+}
+
+radians <- unlist(radians)
+```
+
+The radians are plotted:
+
+```{r}
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/"
+file_name = paste0(path_name, "all_angles.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# converting the data to circular data
+radians <- as.circular( radians, units="radians", zero = 0, rotation = c("counter", "clock") )
+
+# plotting
+plot(radians, stack=TRUE, bins=360*100, shrink=1.8, 
+     cex = 0.5, col=col.alpha( "blue",0.05 ), 
+     main = "Angle data from all rounds",
+     cex.main = 2, axes = FALSE) 
+
+suppressWarnings(
+  axis.circular(at = c(0, pi/2, pi, 3*pi/2), 
+                labels = c("0°", "90°", "180°", "270°"), 
+                tick = FALSE, cex = 0.5, tcl.text = 0.2)
+  )
+
+dev.off()
+
+# could be cool to plot the density as well
+dens(as.numeric(radians))
+
+# This distribution is a bit more complex; hardly bimodal anymore. Instead, there are clear local peaks at all cardinal points + the midpoints between these.
+
+# We can notice that a large chunk of the distribution is centered around zero or 2pi. This can create problems for the analysis later.
+```
+For a simpler overview, they can be plotted as a density curve estimate:
+
+```{r}
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/"
+file_name = paste0(path_name, "kernel_dens_all_angles.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# estimating circle density
+density_data <- density.circular(radians, bw = 20*20)
+
+# plotting the density on a circle
+par(mar = c(2, 2, 2, 2))
+
+plot(density_data, col = "black", 
+     lwd = 1, ylim = c(-2,1.5), xlim = c(-2,2),
+     axes = FALSE, main = "Kernel density estimation for all data points", 
+     ylab = "", cex = 0.2, shrink = 1.2)
+
+# adding axis ticks and labels
+suppressWarnings(
+  axis.circular(at = c(0, pi/2, pi, 3*pi/2), 
+                labels = c("0°", "90°", "180°", "270°"), 
+                tick = TRUE, cex = 0.6, tcl.text = 0.2)
+  )
+
+dev.off()
+```
+
+To facilitate the analysis, it is necessary to restructure the data frame in the following way:
+
+First, the data is arranged by participant label This creates a clear data structure with 6 succeeding rows for each participant:
+
+```{r}
+# arranging data by participant label
+BTL_angles <- BTL_angles %>% arrange(by_group = participant.label)
+```
+
+The angle data for each row has to be unpacked from the JSON format recorded in Otree:
+
+```{r}
+# unpacking JSON data into a nested list format
+raw_angles <- list()
+
+for ( i in 1:nrow(BTL_angles) ){
+  raw_angles[i] <- list( fromJSON( BTL_angles$player.angleData[[i]] ) )
+}
+```
+
+There are many different options when it comes to restructuring the raw angle data.
+
+For this mock-up analysis, I will make a data frame in long format where each participant figures 6 times. 
+
+There will be 6 line variables, indicating the angle of each line for the round *i* in *i:6*. This necessarily means that there will be *NAs* or *0s* where no lines are present. I will have to think about whether this becomes a problem for the regression analysis later on. 
+
+Trying to compose a data frame in long format manually, to look like the following:
+
+Participant | LC 1 | LC 2 | LC 3 | . . . | LC 6 |
+P_n         | {...}| {...}| {...}| . . . | {...}|
+
+```{r}
+# adding a line count variable to keep track of things
+line_count <- rep(seq(1,6, by=1), nrow(BTL_angles)/6)
+BTL_angles$line_count <- line_count
+
+# adding empty columns for each possible line
+BTL_angles <- BTL_angles %>% mutate(l1 = NA, l2 = NA, l3 = NA, l4 = NA, l5 = NA, l6 = NA)
+
+# creating empty matrix
+angle_matrix <- BTL_angles %>% ungroup %>% select(l1, l2, l3, l4, l5, l6, participant.label, line_count)
+
+# defining n_distinct participants
+unique_participants = n_distinct(BTL_angles$participant.label)
+
+# unpacking the angle data into a data frame structure
+for ( participant in seq(1:unique_participants) ) {
+
+  for ( round_number in 1:6 ) {
+    
+    for ( line_number in seq(1:round_number) ) {
+      
+      matrix_row_index <- round_number + ( 6 * ( participant - 1 ) )
+      matrix_column_index <- line_number
+      
+      angle_outer_index <- round_number + ( 6 * ( participant - 1) )
+      angle_inner_index <- line_number
+      
+      named_angle <- raw_angles[[angle_outer_index]][angle_inner_index]
+      
+      angle_matrix[matrix_row_index, matrix_column_index] <- unname(unlist(named_angle))
+    }
+  }
+}
+
+# reordering the data frame
+angle_matrix <- angle_matrix %>% select(participant.label, line_count, l1, l2, l3, l4, l5, l6)
+```
+
+And the angles are converted into radians, following the algorithm described in section 3:
+
+*1. The signs of all data point are flipped (by multiplying with -1). This means that the angles on the upper half of the 'clock' will now correspond to their radian value.*
+
+*2. For data points x where x < 0, the sign of x is flipped once again and the result is subtracted from 2π. This transforms the angle to the radian space.*
+
+```{r}
+angle_columns <- c("l1", "l2", "l3", "l4", "l5", "l6")
+
+# flipping the sign of all data points
+radian_matrix <- angle_matrix %>% mutate( across( c(l1:l6), ~ .*-1 ) )
+
+# for data points x where x < 0, the sign of x is flipped once again and the result is subtracted from 2π. This transforms the angle to the radian space.
+radian_matrix <- radian_matrix %>% mutate( across( c(l1:l6), ~ case_when(
+  . < 0 ~ (2 * pi) - (. * -1),
+  TRUE ~ . # leaves positive values unchanged
+)))
+
+# assessing the final data structure
+head(radian_matrix)
+```
+
+
+## 4.2 Computing number of intersections
+
+Somewhat discouraged by the difficulty of modelling the raw angles, I will continue on to the second model: Modelling the number of intersections as a function of round_number that interacts with the distance matrix.
+
+This model requires the following steps:
+
+1. Compute line intersections
+
+2. Merge the line data with the demographic data from prolific
+
+3. Construct a distance matrix
+
+4. Fit a model 
+
+Before fitting the model, we should think about the nature of the outcome variable. In this case, fitting the data as a conditional poisson distribution could make sense, as we are dealing with positive integers.
+
+### 4.2.0 Preprocessing
+
+Extracting the line starting position data
+
+```{r}
+# selecting the relevant columns
+BTL_lines <- BTL %>% select(participant.label, player.startPosData, participant._current_page_name)
+
+# grouping by participant label
+BTL_lines <- BTL_lines %>% group_by(participant.label)
+
+# removing data from internal tests of the experimental platform
+test_labels <- c("pilot_a", "pilot_b", "pilot_c", "pilot_d", "test_1", "test_2", "test_3", "test_4")
+BTL_lines <- BTL_lines %>% filter(!(participant.label %in% test_labels))
+
+# removing data points for participants that did not reach the goodbye page
+BTL_lines <- BTL_lines %>% filter(participant._current_page_name == "Goodbye")
+
+# removing the current_page_name column 
+BTL_lines <- BTL_lines %>% select(-participant._current_page_name)
+```
+
+```{r}
+# arranging data by participant label
+BTL_lines <- BTL_lines %>% arrange(by_group = participant.label)
+```
+
+The line starting position data for each row has to be unpacked from the JSON format recorded in Otree:
+
+```{r}
+# unpacking JSON data into a nested list format
+raw_lines <- list()
+
+for ( i in 1:nrow(BTL_lines) ){
+  raw_lines[i] <- list( fromJSON( BTL_lines$player.startPosData[[i]] ) )
+}
+```
+
+An extra complication here is that each line has two data points (coordinates) associated with it!
+
+```{r}
+# adding a line count variable to keep track of things
+line_count <- rep(seq(1,6, by=1), nrow(BTL_lines)/6)
+BTL_lines$line_count <- line_count
+
+# adding empty columns for each possible line
+BTL_lines <- BTL_lines %>% mutate(l1_x = NA, l1_y = NA,
+                                  l2_x = NA, l2_y = NA,
+                                  l3_x = NA, l3_y = NA, 
+                                  l4_x = NA, l4_y = NA,
+                                  l5_x = NA, l5_y = NA,
+                                  l6_x = NA, l6_y = NA)
+
+# creating empty matrix
+line_matrix <- BTL_lines %>% ungroup %>% select(c(l1_x:l6_y), participant.label, line_count)
+
+# defining n_distinct participants
+unique_participants = n_distinct(BTL_lines$participant.label)
+
+# unpacking the line data into a data frame structure
+for ( participant in seq(1:unique_participants) ) {
+
+  for ( round_number in 1:6 ) {
+    
+    for ( line_number in seq(1:round_number) ) {
+      
+      for ( coordinate in 1:2 ) {
+      
+        matrix_row_index <- round_number + ( 6 * ( participant - 1 ) )
+        matrix_column_index <- line_number
+      
+        line_outer_index <- round_number + ( 6 * ( participant - 1) )
+        line_inner_index <- line_number
+      
+        named_line <- raw_lines[[line_outer_index]][[line_inner_index]][coordinate]
+      
+        if (coordinate == 1) {
+          # adding the x coordinate
+          line_matrix[matrix_row_index, (matrix_column_index*2)-1] <- unname(unlist(named_line))
+        } else {
+          # adding the y coordinate
+          line_matrix[matrix_row_index, matrix_column_index*2] <- unname(unlist(named_line))
+        }
+      }
+    }
+  }
+}
+
+# reordering the data frame
+line_matrix <- line_matrix %>% select(participant.label, line_count, l1_x:l6_y)
+
+# assessing the data frame
+line_matrix
+```
+
+This looks right! Now we can proceed to merging this with the angle data:
+
+```{r}
+line_angle_data <- merge(angle_matrix, line_matrix, by = c("participant.label", "line_count"))
+```
+
+```{r}
+range(angle_matrix$l1)
+```
+
+
+This data frame now contains angle and starting position information for each line in each drawing by each participant.
+
+### 4.2.1 Computing line intersections
+
+Before doing any computations, the data is transformed into a long format with the following structure:
+
+round | line_nr | angle | x_1 | y_1 | x_2 | y_2 | . . .
+
+1     | 1       | 𝜃    | i   | j   | k   | l   |
+2     | 1       | 𝜃    | i   | j   | k   | l   |
+2     | 2       | 𝜃    | i   | j   | k   | l   |
+3     | 1       | 𝜃    | i   | j   | k   | l   |
+3     | 2       | 𝜃    | i   | j   | k   | l   |
+3     | 3       | 𝜃    | i   | j   | k   | l   |
+.
+.
+.
+
+This would also be good to get rid of the NAs.
+
+```{r}
+# Trying to transform the data into a long format
+
+# transforming angles, x- and y-coordinates separately 
+angles_long <- line_angle_data %>% pivot_longer(
+    cols = l1:l6, 
+    names_to = "angle_index",
+    values_to = "angle",
+    values_drop_na = TRUE) %>% mutate(row_id = row_number()) %>% 
+  select(-c(l1_x:l6_y))
+
+x_long <- line_angle_data %>% pivot_longer(
+    cols = c(l1_x, l2_x, l3_x, l4_x, l5_x, l6_x), 
+    names_to = "x_1_index",
+    values_to = "x_1",
+    values_drop_na = TRUE) %>% mutate(row_id = row_number()) %>% 
+  select(-c(l1:l6_y))
+
+y_long <- line_angle_data %>% pivot_longer(
+    cols = c(l1_y, l2_y, l3_y, l4_y, l5_y, l6_y), 
+    names_to = "y_1_index",
+    values_to = "y_1",
+    values_drop_na = TRUE) %>% mutate(row_id = row_number()) %>% 
+  select(-c(l1:l6_x))
+
+# merging the 3 transformed data frames
+data_long <- merge(angles_long, x_long, by = "row_id")
+data_long <- merge(data_long, y_long, by = "row_id")
+
+# checking that the merging has gone correctly
+identical(data_long$line_count.x, data_long$line_count.y)
+identical(data_long$line_count.x, data_long$line_count)
+identical(data_long$line_count, data_long$line_count.y)
+
+# removing redundant rows
+data_long <- data_long %>% select(-c(line_count.x,line_count.y), 
+                                  -c(x_1_index, y_1_index, angle_index),
+                                  -c(participant.label.x, participant.label.y),
+                                  -row_id)
+# changing the order of columns
+data_long <- data_long %>% select(participant.label, line_count, angle, x_1, y_1)
+
+# checking the logic of the dimensions of the long data frame
+obs_pr_participant <- data_long %>% filter(participant.label == participant.label[1]) %>% n_distinct()
+obs_in_total = obs_pr_participant * n_distinct(data_long$participant.label)
+nrow(data_long) == obs_in_total
+
+# assessing the transformed data
+head(data_long)
+```
+Also, the y-coordinates have been recorded in a matrix fashion, meaning that y = 0 corresponds to the top of the canvas and y = 400 to the bottom. 
+
+I will flip the y coordinates to make it easier to compute and visualise the line intersections:
+
+```{r}
+# changing the range of the y coordinates
+data_long <- data_long %>% mutate(y_1 = 400 - y_1)
+
+# displaying the new range
+range(data_long$y_1)
+```
+
+Now it's time to compute intersections. 
+First, to get an overview of the available information:
+
+For each line, we have:
+
+  - an origin point *OP(x_1, y_1)*,
+  - an angle relative to the horizon *𝜃*, 
+  - and a fixed line length *r* of 215 units. 
+
+We can now find the endpoint *EP(x_2, y_2)* relative to the starting point using the following properties:
+
+$$\cos(\theta) = \frac{\Delta_x}{r}$$
+$$\Delta_x=\cos(\theta)\cdot r$$
+and:
+
+$$\sin(\theta)=\frac{\Delta_y}{r}$$
+$$\Delta_y = -\sin(\theta)\cdot r$$
+Note that sin(𝜃)·r has to be negative due to the earlier reversal of the y-axis.
+
+The final coordinates are obtained by addition with the starting point:
+$$  \begin{bmatrix} x_2 \\ y_2 \end{bmatrix} = \begin{bmatrix} x_1 + \Delta_x \\ y_1 + \Delta_y \end{bmatrix}$$ 
+
+The long data frame should be a good starting point for computing a new column with x and y coordinates for the ending points:
+
+```{r}
+# extracting a drawing to make sure the coordinates fit
+drawings <- BTL %>% filter(participant.label == "66c6121bc818a545e0d5ca0d") %>% select(player.drawing)
+drawings[[1]][2]
+
+drawings
+```
+
+```{r}
+# defining the line length
+r = 215
+
+# creating new columns that contain end points for the lines
+data_long <- data_long %>% mutate(x_2 = x_1 + cos(angle)*r,
+                                  y_2 = y_1 + -sin(angle)*r)
+```
+
+```{r}
+# setting seed
+set.seed(2024)
+
+# defining the number of participants and creating a vector of participant ids
+participant_n = n_distinct(data_long$participant.label)
+participant_ids <- unique(data_long$participant.label)
+
+# sampling a single drawing
+line_drawing <- data_long %>% filter(line_count==2 & participant.label==participant_ids[sample(participant_n, 1)])
+
+# we now have a drawing with four lines
+line_drawing
+```
+
+First, I will test if the 'sf' library can be used to find intersections
+
+```{r}
+# creating lines as simple feature objects
+l1_x1 <- line_drawing$x_1[1]
+l1_y1 <- line_drawing$y_1[1]
+
+l1_x2 <- line_drawing$x_2[1]
+l1_y2 <- line_drawing$y_2[1]
+
+l2_x1 <- line_drawing$x_1[2]
+l2_y1 <- line_drawing$y_1[2]
+
+l2_x2 <- line_drawing$x_2[2]
+l2_y2 <- line_drawing$y_2[2]
+
+line_1 <- st_linestring(rbind(c( l1_x1 , l1_y1 ), c( l1_x2 , l1_y2 )))
+line_2 <- st_linestring(rbind(c( l2_x1 , l2_y1 ), c( l2_x2 , l2_y2 )))
+
+# collecting lines in a new object
+lines <- st_sf(geometry = st_sfc(line_1, line_2))
+
+# computing intersection
+intersection <- st_intersection(line_1, line_2)
+
+# plotting the lines
+plot(line_1, col = "blue", lwd = 2, main = "2 line drawing from participant 66c6121bc818a545e0d5ca0d")
+plot(line_2, col = "red", lwd = 2, add = TRUE)
+
+# plotting the intersection if it exists
+if (!st_is_empty(intersection)) {
+  intersection_coords <- st_coordinates(intersection)
+  points(intersection_coords[,1], intersection_coords[,2],col = "black", pch = 19, cex = 1.5)
+  legend("topright", legend = "Intersection", col = "black", pch = 19, cex = 0.8)
+}
+```
+This is great, because it works!
+
+The next steps are to: 
+
+- Generalize the above steps so that it can find and plot intersections for drawings with up to six lines
+  [Comment: I should test whether the intersection function can deal with more than 2 lines at the same time . . .]
+
+- Return (a) the number of sections for a given drawing and (b) the intersection points [perhaps not useful?]?
+
+- Compute alphas and betas (in the parametric line representations) and store them somewhere
+
+First, I will try the same thing but this time with 3 lines
+
+```{r}
+# setting seed
+set.seed(2024)
+
+# defining the number of participants and creating a vector of participant ids
+participant_n = n_distinct(data_long$participant.label)
+participant_ids <- unique(data_long$participant.label)
+
+# sampling a single drawing
+three_line_drawing <- data_long %>% filter(line_count==3 & participant.label==participant_ids[sample(participant_n, 1)])
+
+# we now have a drawing with four lines
+three_line_drawing
+```
+
+```{r}
+# creating lines as simple feature objects
+l1_x1 <- three_line_drawing$x_1[1]
+l1_y1 <- three_line_drawing$y_1[1]
+
+l1_x2 <- three_line_drawing$x_2[1]
+l1_y2 <- three_line_drawing$y_2[1]
+
+l2_x1 <- three_line_drawing$x_1[2]
+l2_y1 <- three_line_drawing$y_1[2]
+
+l2_x2 <- three_line_drawing$x_2[2]
+l2_y2 <- three_line_drawing$y_2[2]
+
+l3_x1 <- three_line_drawing$x_1[3]
+l3_y1 <- three_line_drawing$y_1[3]
+
+l3_x2 <- three_line_drawing$x_2[3]
+l3_y2 <- three_line_drawing$y_2[3]
+
+line_1 <- st_linestring(rbind(c( l1_x1 , l1_y1 ), c( l1_x2 , l1_y2 )))
+line_2 <- st_linestring(rbind(c( l2_x1 , l2_y1 ), c( l2_x2 , l2_y2 )))
+line_3 <- st_linestring(rbind(c( l3_x1 , l3_y1 ), c( l3_x2 , l3_y2 )))
+
+# collecting lines in a new object
+lines_sf <- st_sf(geometry = st_sfc(
+  line_1, 
+  line_2, 
+  line_3
+  ))
+
+# computing intersection
+intersections <- st_intersection(lines_sf)
+
+# getting the points out
+point_intersections <- intersections[st_geometry_type(intersections) == "POINT", ]
+
+# plotting the lines
+plot(lines_sf$geometry, col = "blue", lwd = 2, main = "3 line drawing from participant 66c6121bc818a545e0d5ca0d")
+
+# plotting the intersection if it exists
+if (nrow(point_intersections) > 0) {
+  intersection_coords <- st_coordinates(point_intersections)
+  points(intersection_coords[,1], intersection_coords[,2],col = "black", pch = 19, cex = 1.5)
+  legend("topright", legend = "Intersection(s)", col = "black", pch = 19, cex = 0.8)
+}
+
+#st_coordinates(point_intersections)
+#st_coordinates(test1[2]$intersection_points)
+```
+Trying to make the same as the above but this time generalized
+
+```{r}
+# defining function to check line intersections
+find_intersections <- function(drawing) {
+  
+  # extract line count
+  line_count <- unique(drawing$line_count) 
+  
+  # set up an empty list
+  line_list <- list()
+  
+  # creating an sf object
+  for (i in 1:line_count) {
+    
+    # extract line coordinates for each line
+    line <- st_linestring(rbind(c( drawing$x_1[i] , drawing$y_1[i] ), 
+                                    c( drawing$x_2[i] , drawing$y_2[i] )))
+    
+    # add the lines to the list
+    line_list[[i]] <- line
+  }
+  
+  # create an sf object from the line list  
+  lines_sf <- st_sf(st_sfc(line_list))
+  
+  # compute intersections
+  intersections <- st_intersection(lines_sf)
+  
+  intersection_points <- intersections[st_geometry_type(intersections) == "POINT", ]
+  
+  # return both the lines and the intersections
+  return(list(lines_sf = lines_sf, 
+              intersection_points = intersection_points,
+              intersection_count = nrow(intersection_points)))
+}
+
+# testing the function
+test1 <- find_intersections(three_line_drawing)
+
+# plotting the lines
+plot(st_geometry(test1[1]$lines_sf), col = "blue", lwd = 2)
+
+# plotting the intersection if it exists
+if (nrow(test1[2]$intersection_points) > 0) {
+  intersection_coords <- st_coordinates(test1[2]$intersection_points)
+  points(intersection_coords[,1], intersection_coords[,2],col = "black", pch = 19, cex = 1.5)
+  legend("topright", legend = "Intersection(s)", col = "black", pch = 19, cex = 0.8)
+}
+```
+For the next iteration, the function is generalised to take any drawing
+
+```{r}
+# plot n random drawings with intersections
+for (i in 1:10){
+
+  # defining the number of participants and creating a vector of participant ids
+  participant_n = n_distinct(data_long$participant.label)
+  participant_ids <- unique(data_long$participant.label)
+  
+  # sampling a single drawing
+  drawing <- data_long %>% 
+    filter(line_count==sample(1:6,1) & participant.label==participant_ids[sample(participant_n, 1)])
+  
+  # trying out the function
+  test2 <- find_intersections(drawing)
+  
+  # plotting the lines
+  plot(st_geometry(test2[1]$lines_sf), col = "blue", lwd = 2,
+       main = paste(unique(drawing$line_count), "line drawing by participant",
+                    unique(drawing$participant.label))
+       )
+  
+  #plotting the intersection if it exists
+  if (nrow(test2[2]$intersection_points) > 0) {
+    intersection_coords <- st_coordinates(test2[2]$intersection_points)
+    points(intersection_coords[,1], intersection_coords[,2],col = "black", pch = 19, cex = 1.5)
+    legend("topright", legend = "Intersection(s)", col = "black", pch = 19, cex = 0.8)
+    }
+
+print(unique(drawing$participant.label))
+
+}
+```
+
+```{r}
+# extracting drawing to test the issue of missing line width currently
+drawings <- BTL %>% filter(participant.label == "65fb1bd8a35ac2c5ea01db6c") %>% select(player.drawing)
+drawings[[1]][6]
+
+# realising that the drawings are flipped . . . 
+```
+
+Currently, the *find_intersections* function takes a drawing (all 'lines' [rows] associated with the same round for the same participants) and computes the number of intersections for that drawing. 
+
+To construct a feature column with intersections, I will construct a simple for loop. One thing to keep in mind is that the single line drawings will all contain 0 intersections. I will keep them in for now, but they should be filtered out later for the analysis.
+
+
+```{r}
+# creating vector of participant IDs and storing the length of this vector
+participant_ids <- unique(data_long$participant.label)
+participant_n = n_distinct(data_long$participant.label)
+
+# setting up the empty variables
+participant.label <- list()
+line_count <- list()
+intersection_count <- list()
+
+# creating a loop
+for (participant in 1:length(participant_ids)) {
+  
+  for (round in 1:6) {
+    
+    # creating a subset of lines for each round for each participant
+    participant_subset <- data_long %>% filter(participant.label == participant_ids[participant]) %>% filter(line_count == round)
+    
+    # computing the line intersections
+    line_intersections <- find_intersections(drawing = participant_subset)
+    
+    # storing information  
+    participant.label[ 6 * (participant-1) + round] <- unique(participant_subset$participant.label)
+    
+    line_count[ 6 * (participant-1) + round] <- unique(participant_subset$line_count)
+      
+    intersection_count[ 6 * (participant-1) + round] <- line_intersections$intersection_count
+  
+  }
+}
+
+# combining the lists into a data frame
+intersection_data <- data_frame(participant.label = unlist(participant.label),
+                                line_count = unlist(line_count),
+                                intersection_count = unlist(intersection_count))
+
+# inspecting the data frame
+head(intersection_data)
+```
+
+```{r}
+# testing that everything adds up by looping through a number of drawings, plotting them with intersections, and displaying the intersection count information from the new intersection_data data frame
+for (i in 1:20) {
+
+  drawing <- data_long %>% 
+    filter(line_count==intersection_data$line_count[i] & participant.label==intersection_data$participant.label[i])
+    
+  test3 <- find_intersections(drawing)
+    
+  # plotting the lines
+  plot(st_geometry(test3[1]$lines_sf), col = "blue", lwd = 2,
+       main = paste(unique(drawing$line_count), "line drawing by participant", unique(drawing$participant.label)),
+       sub = paste("intersection count = ", intersection_data$intersection_count[i])
+       )
+    
+  #plotting the intersection if it exists
+  if (nrow(test3[2]$intersection_points) > 0) {
+      intersection_coords <- st_coordinates(test3[2]$intersection_points)
+      points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 1.5)
+      legend("topright", legend = "Intersection(s)", col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 0.8)
+  }
+}
+```
+Comments: 
+
+The intersection count reflects the number of intersections computed for each drawing.
+The main issue with the current implementation of intersection count, is that some lines can be very close without actually intersections.
+
+A relevant questions here is whether it would be better to extend the line so they mimic the thickness of the lines used in the drawing program. This would mitigate the problem of a small mismatch between intersections in the drawing platform being deemed non-intersections in the analysis. 
+
+However, it would not fix the problem of what could be considered *a likely intention of intersection* on the part of the participant; where the goal appears to be the creation (or suggestion) of a closed form, but the lines do not exactly meet. 
+
+For example, many of the 'squares' in the above sample looks to be having this issue as the intersections are happening very close to the ends of the lines.
+
+```{r}
+drawings <- BTL %>% filter(participant.label == "5773ac203146cb0001d1a27b") %>% select(player.drawing)
+drawings[[1]][2]
+```
+
+I will not try to solve these issues, but will report on them as limitations to the current mode of analysis.
+
+### 4.2.2 Merging the intersection data frame with demographic and geographic data
+
+```{r}
+# checking the raw distribution of intersections with an without 0 included
+par(mfrow=c(1, 2))
+
+simplehist(intersection_data$intersection_count,
+           xlab = "intersections",
+           main = paste("n = ", length(intersection_data$intersection_count)))
+
+simplehist(intersection_data$intersection_count[intersection_count != 0],
+           xlab = "intersections",
+           main = paste("n = ", length(intersection_data$intersection_count[intersection_count != 0])))
+```
+
+```{r}
+# inspecting the prolific data frame
+head(prolific)
+```
+Selecting relevant columns and getting and overview of the sample:
+
+```{r}
+# filtering out rows for the participant who did not receive automatic approval
+# and selecting the rows with the demographic data of interest to the analysis
+demographic_data <- prolific %>% 
+  filter(Status == "APPROVED") %>%
+  select(participant.label = `Participant id`,
+         country_of_birth = `Country of birth`,
+         country_of_residence = `Country of residence`,
+         nationality = Nationality,
+         gender = Sex,
+         age = Age)
+
+# checking the gender distribution of the sample
+gender_table <- table(demographic_data$gender)
+
+barplot(gender_table, lwd = 2, col = c(3,7,6),
+        main = "Declared gender distribution of the participant sample")
+
+# checking the age distribution of the sample
+demographic_data$age <- as.numeric(demographic_data$age)
+
+simplehist(demographic_data$age, xlab = "age (years)", main = "Participant age distribution")
+
+# checking the distribution by nationality
+table(demographic_data$nationality)
+```
+The sample is fairly balanced in terms of male and female participants. 
+The age distribution is skewed towards participants between 20 and 30. 
+
+Since we have no reason to believe that either age, nor gender would affect the data in any particular way, we will simply note these qualities of the sample. But neither of the variables, gender and age, will be included the analyses.
+
+Now, the data is merged with the intersection data frame:
+
+```{r}
+# merging data frames
+intersection_prolific_merge <- merge(intersection_data, demographic_data, by = "participant.label")
+
+# arranging the data according to participant id and line count
+intersection_prolific_merge <- intersection_prolific_merge %>% group_by(participant.label) %>% arrange(by_group = participant.label, line_count)
+```
+The next step is to merge the newly combined data frame with the data frame from the sample creation process, containing geographic information (country centroids), that will be used to create a distance matrix:
+
+```{r}
+# checking that the country names match:
+n1 <- sort(unique(prolific_geography$country_name))
+n2 <- sort(unique(intersection_prolific_merge$nationality))
+n1==n2
+```
+
+```{r}
+colnames(prolific_geography)
+```
+
+```{r}
+# merging the data
+intersection_prolific_geography <- merge(intersection_prolific_merge, prolific_geography, 
+                                         by.x = "nationality", by.y = "country_name")
+
+# sorting the data according to participant and linecount
+intersection_prolific_geography <- intersection_prolific_geography %>% 
+  group_by(participant.label) %>% 
+  arrange(by_group = participant.label, line_count)
+```
+
+Comment: Nationality is here used as the demographic basis for computing the distances.
+
+```{r}
+# checking the distribution by nationality
+table(intersection_prolific_geography$macroarea_name)
+```
+
+## 4.3 Computing cosine similarity with a horizontal vector
+
+### 4.3.1 Preparing data
+
+First, I will prepare a data frame with the relevant information. Unlike the line intersection analysis where we need a single row for each drawing, the angle analysis requires a row pr. line. This is what we have in the original 'data_long' data frame created for an earlier step in the previous analysis.
+
+```{r}
+head(data_long)
+```
+
+I will merge this data frame with the data frames containing demographic and geographic information:
+
+```{r}
+# creating a subset from the prolific demographic data
+demographic_data <- prolific %>%
+  filter(Status == "APPROVED") %>%
+  select(participant.label = `Participant id`,
+         country_of_birth = `Country of birth`,
+         country_of_residence = `Country of residence`,
+         nationality = Nationality,
+         gender = Sex,
+         age = Age)
+```
+
+```{r}
+# merging data frames
+angle_prolific_merge <- merge(data_long, demographic_data, by = "participant.label", all.x = TRUE)
+
+# arranging the data according to participant id and line count
+angle_prolific_merge <- angle_prolific_merge %>% group_by(participant.label) %>% arrange(by_group = participant.label, line_count)
+
+# finding missing matches
+angle_prolific_merge %>% filter(is.na(country_of_birth)) %>% summarise(unique(participant.label))
+```
+
+Notice that in the current data downloads, 8 participants in the Otree experiment is not matched in the prolific data download. The data for these participants will have to be dropped from the analysis (which is done automatically using merge without the all.x = TRUE argument):
+
+```{r}
+# merging data frames
+angle_prolific_merge <- merge(data_long, demographic_data, by = "participant.label")
+
+# arranging the data according to participant id and line count
+angle_prolific_merge <- angle_prolific_merge %>% group_by(participant.label) %>% arrange(by_group = participant.label, line_count)
+```
+
+```{r}
+# merging the data with the geographic data frame
+angle_prolific_geography <- merge(angle_prolific_merge, prolific_geography,
+                                         by.x = "nationality", by.y = "country_name")
+
+# sorting the data according to participant and linecount
+angle_prolific_geography <- angle_prolific_geography %>%
+  group_by(participant.label) %>%
+  arrange(by_group = participant.label, line_count)
+```
+
+```{r}
+# selecting and rearranging the columns needed for the analysis
+angle_data <- angle_prolific_geography %>% select(participant.label,
+                                                  line_count,
+                                                  angle,
+                                                  x_1, y_1, x_2, y_2,
+                                                  nationality,
+                                                  macroarea)
+```
+
+Notice: The angles in the long data frame are recorded in reversed radians from [-pi,pi] (this is how they were recorded in Otree). I will transform them to non-reversed radians, so that drawing a line from the top to the bottom of the canvas corresponds to a -pi/2 angle.
+
+I will also add an extra macroarea variable coded as integers:
+
+```{r}
+# reversing angle range
+angle_data <- angle_data %>% mutate(angle = angle * -1)
+
+# coding integer macroarea variable
+angle_data$macroarea <- as.factor(angle_data$macroarea)
+angle_data$macroarea_int <- as.integer(angle_data$macroarea)
+
+head(angle_data)
+```
+
+```{r}
+# writing to csv
+write_csv(angle_data, file = "/Users/christianstenbro/AU/BSc/data/angle_data.csv")
+```
+
+### 4.3.2 Computing feature
+
+To compute the relative horizontality/verticality/obliquety of each line in each drawing, the all angles will be assigned a new value expressing their cosine similarity with a horizontal vector.
+
+First, two new columns representing the cosine and sine of each angle are computed:
+
+```{r}
+angle_data <- angle_data %>% 
+  mutate(cos = cos(angle),
+         sin = sin(angle))
+```
+
+Then the cosine similarity between each line and a horizontal vector can now be computed. 
+
+A horizontal vector forming an angle v between itself and the x-axis, corresponding to 0 degrees, is characterised by the following properties: cos(v) = 1, sin(v) = 0. 
+
+```{r}
+# implementing cosine similarity function
+cosine_similarity <- function(vector_1, vector_2) {
+
+  dot_product <- (vector_1[1] * vector_2[1]) + (vector_1[2] * vector_2[2])
+  
+  # Calculate the magnitudes of the vectors
+  magnitude_1 <- sqrt(sum(vector_1^2))
+  magnitude_2 <- sqrt(sum(vector_2^2))
+  
+  # Return the cosine similarity
+  return(dot_product / (magnitude_1 * magnitude_2))
+}
+
+# testing the function
+v1 <- c(0.8829342, -0.4694968)
+v2 <- c(1,0)
+
+cosine_similarity( v1 , v2 )
+
+# comparing this with the lsa implementation
+lsa::cosine(v1, v2) == cosine_similarity( v1 , v2 )
+```
+
+```{r}
+# defining horizontal vector
+h <- c(1,0)
+
+# computing the absolute cosine similarity for each line
+angle_data <- angle_data %>% 
+  rowwise() %>% mutate(cosine_similarity_h = abs(cosine(c(cos, sin), h)))
+
+# visualising the cosine similarities 
+dens(angle_data$cosine_similarity_h)
+```
+
+```{r}
+angle_data
+```
+
+Now, we can display this measure with random sets of individual drawings:
+
+```{r}
+for (i in 1:40) {
+
+drawing <- angle_data %>% filter(participant.label == participant_ids[i], line_count == 5)
+  
+  test3 <- find_intersections(drawing)
+  
+  ID <- unique(drawing$participant.label)
+    
+  # plotting the lines
+  plot(st_geometry(test3[1]$lines_sf), col = "blue", lwd = 2,
+       main = paste(unique(drawing$line_count), "line drawing by participant",
+                    unique(drawing$participant.label)),
+       sub = paste("intersection count = ", test3$intersection_count,
+                   "\n mean cosine similarity h = ", round(mean(drawing$cosine_similarity_h),3))
+       )
+    
+  #plotting the intersection if it exists
+  intersection_coords <- st_coordinates(test3[2]$intersection_points)
+  
+  points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.8), 
+         pch = 19, cex = 1.5)
+  
+  legend("topright", legend = "Intersection(s)", col = col.alpha("orange", alpha = 0.8), 
+         pch = 19, cex = 0.8)
+  
+}
+```
+
+```{r}
+for (i in 1:20) {
+
+drawing <- angle_data %>% filter(participant.label == participant_ids[i], line_count == 1)
+  
+  test3 <- find_intersections(drawing)
+  
+  ID <- unique(drawing$participant.label)
+    
+  # plotting the lines
+  plot(st_geometry(test3[1]$lines_sf), col = "blue", lwd = 2,
+       main = paste(unique(drawing$line_count), "line drawing by participant",
+                    unique(drawing$participant.label)),
+       sub = paste("\n mean cosine similarity h = ", round(mean(drawing$cosine_similarity_h),3))
+       )
+    
+  #plotting the intersection if it exists
+  intersection_coords <- st_coordinates(test3[2]$intersection_points)
+  
+  points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.8), 
+         pch = 19, cex = 1.5)
+  
+}
+```
+
+The data is now aggregated to be ready for analysis:
+
+```{r}
+# aggregating data
+angle_data_aggregated <- angle_data %>% group_by(participant.label, line_count) %>% 
+  summarise(cosine_similarity_h = mean(cosine_similarity_h),
+            participant.label = unique(participant.label),
+            line_count = unique(line_count),
+            macroarea = unique(macroarea)
+  )
+```
+
+```{r}
+# plotting the density distribution for each level of the line count variable
+par(mfrow = c(2,3))
+for (i in 1:6) {
+  dens(angle_data_aggregated$cosine_similarity_h[angle_data_aggregated$line_count == i], 
+       main = paste("line count = ", i))
+  }
+```
+
+Comment: It is interesting to see the pronounced peak in the middle of the scale for line count = 4. This could be something to look into.
+
+## 4.4 Computing the cosine similarity between lines
+
+The first step is to compute an average cosine similarity for a single participant:
+
+```{r}
+# creating a data frame with angles (in their cos and sin expression) and transposing it
+cos_sin_df = t(data_frame(cos = angle_data$cos[angle_data$participant.label == participant_ids[1]],
+               sin = angle_data$sin[angle_data$participant.label == participant_ids[1]]))
+
+# computing cosine similarities pairwise
+cosine_similarities <- lsa::cosine(cos_sin_df)
+
+# checking the dimensions of the cosine_similarities matrix - should be 21*21
+dim(cosine_similarities)
+
+# computing the average cosine_similarity
+mean(cosine_similarities)
+```
+
+Since the matrix is symmetrical around the diagonal, which itself contain self-correlations for all lines in the drawing, the mean only has to be of one of the 'triangles' of the matrix, excluding the diagonal.
+
+Note: It should be the absolute cosine similarity already at this level; if not, it will create errors, such as the square having a mean cosine similarity of 0, when the result should be around 0.5. We should not distinguish between lines that are drawn from different directions, yet appear visually similar.
+
+```{r}
+# creating a data frame with angles (in their cos and sin expression) and transposing it
+for (i in 1:40) {
+
+drawing <- angle_data %>% filter(participant.label == participant_ids[i], line_count == 2)
+
+cos_sin_df = t(data_frame(cos = drawing$cos,
+               sin = drawing$sin))
+
+# computing cosine similarities pairwise
+cosine_similarities <- lsa::cosine(cos_sin_df)
+
+# checking the dimensions of the cosine_similarities matrix - should be 21*21
+dim(cosine_similarities)
+
+# computing the average cosine_similarity
+total_mean <- mean(cosine_similarities)
+lower_tri_mean <- mean(abs(cosine_similarities[lower.tri(cosine_similarities, diag = FALSE)]))
+
+# plotting
+
+  test3 <- find_intersections(drawing)
+  
+  ID <- unique(drawing$participant.label)
+    
+  # plotting the lines
+  plot(st_geometry(test3[1]$lines_sf), col = "blue", lwd = 2,
+       main = paste(unique(drawing$line_count), "line drawing by participant", unique(drawing$participant.label)),
+       sub = paste("intersection count = ", test3$intersection_count,
+                   "\nmean cosine similarity = ", round(total_mean, 3),
+                   "\nabsolute of the lower triangle mean = ", round(lower_tri_mean, 3))
+       )
+    
+  #plotting the intersection if it exists
+      intersection_coords <- st_coordinates(test3[2]$intersection_points)
+      points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 1.5)
+      legend("topright", legend = "Intersection(s)", col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 0.8)
+      
+}
+```
+
+This can now be computed for all drawings:
+
+```{r}
+# computing the mean cosine similarity for each drawing
+consine_similarity_drawing_level <- angle_data %>% 
+  filter(line_count != 1 ) %>% 
+  group_by(participant.label, line_count) %>%
+  summarize(cosine_similarity_mean = {
+      cos_sin_matrix <- t(data.frame(cos = cos, sin = sin))
+  
+      cosine_similarities <- lsa::cosine(cos_sin_matrix)
+      
+      abs(mean(cosine_similarities[lower.tri(cosine_similarities, diag = FALSE)]))
+    },
+  ) %>% 
+  ungroup()
+
+# adding a rounded mean column
+consine_similarity_drawing_level <- consine_similarity_drawing_level %>% mutate(rounded_mean = round(cosine_similarity_mean, 3))
+
+# plotting some subsets
+par(mfrow=c(2,3))
+
+for (i in 2:6) {
+  sub <- consine_similarity_drawing_level %>% filter(line_count == i) %>% select(cosine_similarity_mean) 
+  dens(sub$cosine_similarity_mean)
+  title(main = paste(i, " lines"), cex.main = 0.8, line = 0.3)
+}
+mtext("Between line cosine similarity for different line counts", outer = TRUE, cex = 1, line = -2)
+```
+The plot shows a clear tendency for parallel lines for lower counts, with more angular diversity at higher levels. This is quite interesting!
+
+Before the analysis, I will append the geographic data to the cosine similarity data frame:
+
+```{r}
+# extracting geographic data from the angle data frame
+angle_geographic_subset_2 <- angle_data %>% 
+  filter(line_count != 0) %>% 
+  group_by(participant.label, line_count) %>% 
+  summarise(participant.label = unique(participant.label),
+            line_count = unique(line_count),
+            macroarea = unique(macroarea),
+            macroarea_int = unique(macroarea_int))
+
+# merging the data frame with the cosine similarity data
+cs_data <- merge(consine_similarity_drawing_level, angle_geographic_subset_2, by = c("participant.label","line_count"))
+
+# inspecting the merged data frame
+cs_data
+```
+
+Comment: Since the 1-line drawings can't have any between line similarity, this data frame is shorter compared to those containing the other features. This means that there will be NAs when merging the data frames.
+
+## 4.5 Merging features
+
+A single data frame with all features is created:
+
+```{r}
+# selecting features
+f1 <- angle_data_aggregated
+
+f2 <- intersection_prolific_merge %>% select(participant.label, line_count, intersection_count)
+
+f3 <- cs_data %>% select(participant.label, line_count, abs_avg_between_line_cosine_sim = cosine_similarity_mean)
+
+# merging features
+feature_data_set <- merge(f1, f2, by = c("participant.label", "line_count"))
+
+feature_data_set <- merge(feature_data_set, f3, all.x = TRUE, by = c("participant.label", "line_count")) # creates NAs for line_count 1
+
+head(feature_data_set)
+```
+
+# 5 Different visualisations
+
+## 5.1 Plotting density estimates of angle distribution for different regions and line counts
+
+```{r}
+# creating a macroarea name index
+macroarea_idx <- unique(angle_data$macroarea)
+
+# renaming papunesia to multinesia
+#levels(macroarea_idx)[levels(macroarea_idx) == "Papunesia"] <- "Multinesia"
+```
+
+```{r}
+# setting up a plot grid
+par(mfrow = c(2,3))
+
+# plotting the density estimate for all angles for all macroareas
+for (i in 1:6){
+  
+  angle_set <- angle_data %>% filter(macroarea == macroarea_idx[i]) %>% select(angle)
+
+  angle_set <- as.circular( angle_set$angle, types = "angle", 
+                            template = "none", modulo = "asis", 
+                            units="radians", zero = 0, 
+                            rotation = c("counter", "clock") )
+         
+  # estimating circle density
+  density_data <- density.circular(angle_set, bw = 20*5)
+  
+  # plotting the density on a circle
+  par(mar = c(2, 2, 2, 2))
+  
+  plot(density_data, col = "black", 
+       lwd = 1, ylim = c(-2,1.5), xlim = c(-1,3),
+       axes = FALSE, main = "",
+       cex.main = 0.7, ylab = "")
+  title(main = paste(macroarea_idx[i]), adj = 0.1)
+  
+  # adding axis ticks and labels
+  suppressWarnings(
+    axis.circular(at = c(0, pi/2, pi, 3*pi/2), 
+                  labels = c("0°", "90°", "180°", "270°"), 
+                  tick = TRUE, cex = 0.6, tcl.text = 0.2)
+    )
+}
+```
+We can also plot for each line count individually:
+
+```{r}
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/densities/"
+
+file_name = paste0(path_name, "raw_angles.tiff")
+
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# setting up a plot grid
+par(mfrow = c(2,3))
+
+# plotting the density estimate for all angles for all macroareas
+for (i in 1:6) {
+
+  # setting a transparency level for the curves
+  alpha = 0.7
+  
+  # creating a subset with all angles
+  angle_set <- angle_data %>% filter(macroarea == macroarea_idx[i]) %>% select(angle, line_count)
+  
+  # converting the angles to class circular
+  angle_set$angle <- as.circular( angle_set$angle, types = "angle", 
+                              template = "none", modulo = "asis", 
+                              units="radians", zero = 0, 
+                              rotation = c("counter", "clock") )
+         
+  # setting up plotting window
+  par(mar = c(2, 2, 2, 2))
+  
+  # estimating circle density for a single area and a single line count
+  density_data <- density.circular(angle_set$angle[angle_set$line_count == 1], bw = 20*5)
+  
+  # plotting the density on a circle
+  plot(density_data, 
+       col = col.alpha(1, alpha = alpha), 
+       lwd = 1, ylim = c(-2.4,1.1), xlim = c(-0.5,2.4),
+       axes = FALSE, main = "",
+       cex.main = 0.7, ylab = "")
+  title(main = paste(macroarea_idx[i]), adj = 0.1)
+  
+  # adding the curve of another line count
+  for (i in 2:6) {
+  
+    density_data <- density.circular(angle_set$angle[angle_set$line_count == i], bw = 20*5)
+    
+    lines(density_data, col = col.alpha(i, alpha = alpha), lwd = 1)
+    
+  }
+
+}
+
+legend("bottomright", legend = paste("Line count = ", 1:6), 
+       col = c(1:6), lwd = 1, bty = "n", cex = 0.7)
+
+dev.off()
+```
+
+```{r}
+# setting up a plot grid
+par(mfrow = c(2,3))
+
+# plotting the density estimate for all angles for all macroareas
+for (i in 1:6){
+  
+  angle_set <- angle_data %>% filter(macroarea == macroarea_idx[i], line_count == 1) %>% select(angle)
+
+  angle_set <- as.circular( angle_set$angle, types = "angle", 
+                            template = "none", modulo = "asis", 
+                            units="radians", zero = 0, 
+                            rotation = c("counter", "clock") )
+         
+  # estimating circle density
+  density_data <- density.circular(angle_set, bw = 20*5)
+  
+  # plotting the density on a circle
+  par(mar = c(2, 2, 2, 2))
+  
+  plot(density_data, col = "black", 
+       lwd = 1, ylim = c(-2.3,1.3), xlim = c(-1,3),
+       axes = FALSE, main = "",
+       cex.main = 0.7, ylab = "")
+  title(main = paste(macroarea_idx[i]), adj = 0.1)
+  
+  # adding axis ticks and labels
+  suppressWarnings(
+    axis.circular(at = c(0, pi/2, pi, 3*pi/2), 
+                  labels = c("0°", "90°", "180°", "270°"), 
+                  tick = TRUE, cex = 0.6, tcl.text = 0.2)
+    )
+}
+```
+
+
+## 5.2 Plotting random samples of line drawings with all features displayed 
+
+Constructing a filter to isolate distinct patterns:
+
+```{r}
+# creating color mapping
+
+# Get the default palette colors (base R typically uses 8 colors)
+color_palette <- palette()
+
+# Map the sorted macroareas to the default colors (only using as many as needed)
+color_map <- setNames(color_palette[2:7], levels(feature_data_set$macroarea))
+```
+
+
+```{r}
+# setting up parameters
+lc = 3
+h = range(0.9, 1)
+ic = 0
+ls = range(0,1)
+
+iteration = 8
+
+# filtering
+drawing_subset <- feature_data_set %>% 
+  filter(line_count == lc,
+         between(cosine_similarity_h, h[1], h[2]),
+         intersection_count == ic
+         , between(abs_avg_between_line_cosine_sim, ls[1], ls[2])
+         )
+
+# print the length of the subset
+set_size = nrow(drawing_subset)
+distribution = table(drawing_subset$macroarea)
+distribution
+```
+
+```{r}
+# setting seed
+random_seed <- 2025
+set.seed(random_seed)
+
+# extracting n random drawings from the subset
+n <-  9
+ID <- drawing_subset[sample(nrow(drawing_subset), size = n), ]
+
+# fixing aspect ratio and setting up a grid
+par(pty="s", mfrow=c(2,5), mar = c(4, 2, 1, 1))
+
+# plotting drawings with computations for all features 
+for (i in 1:n) {
+  
+  ID_p <- ID$participant.label[i]
+               
+  features <- drawing_subset %>% filter(participant.label == ID_p, line_count == lc)
+  
+  drawing <- angle_data %>% filter(participant.label == ID_p, line_count == lc)
+  
+  intersections <- find_intersections(drawing)
+  
+  # plotting the lines
+  plot(st_geometry(intersections[1]$lines_sf), col = color_map[drawing$macroarea], lwd = 2, xlim = c(0, 400), ylim = c(0, 400),
+       #main = paste(unique(features$line_count), "line drawing by participant", unique(features$participant.label)),
+       sub = paste("intersection count = ", features$intersection_count,
+                   "\nmean horizontality = ", round(features$cosine_similarity_h, 3),
+                   "\nline similarity = ", round(features$abs_avg_between_line_cosine_sim, 3),
+                   "\n macroarea = ", unique(drawing$macroarea)),
+       cex.sub = 0.8
+       )
+    
+  # plotting the intersection if it exists
+  intersection_coords <- st_coordinates(intersections[2]$intersection_points)
+  points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.7), pch = 19, cex = 0.8)
+    
+  # creating legend  
+  
+  # plotting the 'canvas' limits  
+  box()
+}
+
+# adding a main title
+mtext(paste("9 random drawings from a filtered subset (n =", nrow(drawing_subset),") ;", "lc =", lc, "; h = [", paste0(h[1],",",h[2]), "] ; ic =", ic, "; ls = [", paste0(ls[1],",",ls[2]), "]"), 
+      outer = TRUE, cex = 0.7, line = -2)
+
+#### saving
+
+# finding dimensions
+plot_dims <- dev.size("in")
+
+plot_width_inch <- plot_dims[1]  
+plot_height_inch <- plot_dims[2] 
+
+# setting dpi
+dpi <- 300
+
+# Convert dimensions from inches to pixels
+plot_width_pixels <- plot_width_inch * dpi
+plot_height_pixels <- plot_height_inch * dpi
+
+# plot distribution
+plot(distribution, col = unique(color_map),
+     cex.axis = 0.7, las = 2)
+```
+```{r}
+# setting up file details
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/drawing_samples/"
+
+plot_title = paste0("iteration_", iteration, "_seed_", random_seed, "_lc_", lc, "_h_", paste0(h[1],"_",h[2]), "_ic_", ic, "_ls_", paste0(ls[1],"_",ls[2]))
+
+file_extension = ".tiff"
+
+file_name = paste0(path_name, plot_title, file_extension)
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# setting seed
+random_seed <- 2025
+set.seed(random_seed)
+
+# extracting n random drawings from the subset
+n <-  9
+ID <- drawing_subset[sample(nrow(drawing_subset), size = n), ]
+
+# fixing aspect ratio and setting up a grid
+par(pty="s", mfrow=c(2,5), mar = c(4, 2, 1, 1))
+
+# plotting drawings with computations for all features 
+for (i in 1:n) {
+  
+  ID_p <- ID$participant.label[i]
+               
+  features <- drawing_subset %>% filter(participant.label == ID_p, line_count == lc)
+  
+  drawing <- angle_data %>% filter(participant.label == ID_p, line_count == lc)
+  
+  intersections <- find_intersections(drawing)
+  
+  # plotting the lines
+  plot(st_geometry(intersections[1]$lines_sf), col = color_map[drawing$macroarea], lwd = 2, xlim = c(0, 400), ylim = c(0, 400),
+       #main = paste(unique(features$line_count), "line drawing by participant", unique(features$participant.label)),
+       sub = paste("intersection count = ", features$intersection_count,
+                   "\nmean horizontality = ", round(features$cosine_similarity_h, 3),
+                   "\nline similarity = ", round(features$abs_avg_between_line_cosine_sim, 3),
+                   "\n macroarea = ", unique(drawing$macroarea)),
+       cex.sub = 0.8
+       )
+    
+  # plotting the intersection if it exists
+  intersection_coords <- st_coordinates(intersections[2]$intersection_points)
+  points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.7), pch = 19, cex = 0.8)
+    
+  # creating legend  
+  
+  # plotting the 'canvas' limits  
+  box()
+}
+
+# adding a main title
+mtext(paste("9 random drawings from a filtered subset (n =", nrow(drawing_subset),") ;", "lc =", lc, "; h = [", paste0(h[1],",",h[2]), "] ; ic =", ic, "; ls = [", paste0(ls[1],",",ls[2]), "]"), 
+      outer = TRUE, cex = 0.7, line = -2)
+
+#### saving
+
+# finding dimensions
+plot_dims <- dev.size("in")
+
+plot_width_inch <- plot_dims[1]  
+plot_height_inch <- plot_dims[2] 
+
+# setting dpi
+dpi <- 300
+
+# Convert dimensions from inches to pixels
+plot_width_pixels <- plot_width_inch * dpi
+plot_height_pixels <- plot_height_inch * dpi
+
+# plot distribution
+plot(distribution, col = unique(color_map),
+     cex.axis = 0.7, las = 2)
+
+dev.off()
+```
+
+Doing the same thing but with random parameters
+
+```{r}
+drawing_subset
+```
+
+
+```{r}
+# setting up parameters
+random_seed <- 3000
+set.seed(random_seed)
+drawing_subset <- feature_data_set
+distribution = table(drawing_subset$macroarea)
+it = 11
+n <-  9
+ID <- drawing_subset[sample(nrow(drawing_subset), size = n), ]
+
+# setting up file details
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/drawing_samples/"
+plot_title = paste0("random_sample_", "iteration_", iteration, "_seed_", random_seed)
+file_extension = ".tiff"
+file_name = paste0(path_name, plot_title, file_extension)
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# fixing aspect ratio and setting up a grid
+par(pty="s", mfrow=c(2,5), mar = c(4, 2, 1, 1))
+
+# plotting drawings with computations for all features 
+for (i in 1:n) {
+  
+  lc <- sample(1:6,1) # random line counts
+  
+  ID_p <- ID$participant.label[i]
+               
+  features <- drawing_subset %>% filter(participant.label == ID_p, line_count == lc)
+  
+  drawing <- angle_data %>% filter(participant.label == ID_p, line_count == lc)
+  
+  intersections <- find_intersections(drawing)
+  
+  # plotting the lines
+  plot(st_geometry(intersections[1]$lines_sf), col = color_map[drawing$macroarea], lwd = 2, xlim = c(0, 400), ylim = c(0, 400),
+       #main = paste(unique(features$line_count), "line drawing by participant", unique(features$participant.label)),
+       sub = paste("intersection count = ", features$intersection_count,
+                   "\nmean horizontality = ", round(features$cosine_similarity_h, 3),
+                   "\nline similarity = ", round(features$abs_avg_between_line_cosine_sim, 3),
+                   "\n macroarea = ", unique(drawing$macroarea)),
+       cex.sub = 0.8
+       )
+    
+  # plotting the intersection if it exists
+  intersection_coords <- st_coordinates(intersections[2]$intersection_points)
+  points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.7), pch = 19, cex = 0.8)
+    
+  # creating legend  
+  
+  # plotting the 'canvas' limits  
+  box()
+}
+
+# adding a main title
+mtext(paste0("9 random drawings from the entire set (n = ", nrow(drawing_subset), ")"), 
+      outer = TRUE, cex = 0.7, line = -2)
+
+#### saving
+
+# finding dimensions
+plot_dims <- dev.size("in")
+
+plot_width_inch <- plot_dims[1]  
+plot_height_inch <- plot_dims[2] 
+
+# setting dpi
+dpi <- 300
+
+# Convert dimensions from inches to pixels
+plot_width_pixels <- plot_width_inch * dpi
+plot_height_pixels <- plot_height_inch * dpi
+
+# plot distribution
+plot(distribution, col = unique(color_map),
+     cex.axis = 0.7, las = 2)
+
+dev.off()
+```
+
+
+
+Sampling random drawings, only filtered by line count:
+
+```{r}
+# setting up parameters
+lc = 4
+h = range(0,1)
+ic = 9
+ls = range(0,1)
+
+iteration = 2
+
+# filtering
+drawing_subset <- feature_data_set %>% filter(line_count == lc
+                                              #between(cosine_similarity_h, h[1], h[2]),
+                                              #intersection_count > ic,
+                                              #between(abs_avg_between_line_cosine_sim, ls[1], ls[2])
+                                              )
+# print the length of the subset
+nrow(drawing_subset)
+```
+
+```{r}
+# extracting n random drawings from the subset
+it = 5
+n <-  10
+ID <- drawing_subset[sample(nrow(drawing_subset), size = n), ]
+
+# fixing aspect ratio and setting up a grid
+par(pty="s", mfrow=c(2,5), mar = c(4, 1, 1, 1))
+
+# plotting drawings with computations for all features 
+for (i in 1:n) {
+  
+  ID_p <- ID$participant.label[i]
+  
+  lc = sample(1:6,1)
+               
+  features <- drawing_subset %>% filter(participant.label == ID_p, line_count == lc)
+  
+  drawing <- angle_data %>% filter(participant.label == ID_p, line_count == lc)
+  
+  intersections <- find_intersections(drawing)
+
+  # plotting the lines
+  plot(st_geometry(intersections[1]$lines_sf), col = "blue", lwd = 2, xlim = c(0, 400), ylim = c(0, 400),
+       #main = paste(unique(features$line_count), "line drawing by participant", unique(features$participant.label)),
+       sub = paste("intersection count = ", features$intersection_count,
+                   "\nmean horizontality = ", round(features$cosine_similarity_h, 3),
+                   "\nline similarity = ", round(features$abs_avg_between_line_cosine_sim, 3)),
+       cex.sub = 0.8
+       )
+    
+  # plotting the intersection if it exists
+  # intersection_coords <- st_coordinates(intersections[2]$intersection_points)
+  # points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 1.5)
+    
+  # creating legend  
+  #legend("topright", legend = "Intersection(s)", col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 0.8)
+  
+  # plotting the 'canvas' limits  
+  box()
+}
+
+# title
+mtext(paste("10 random drawings (n =", nrow(drawing_subset),") ;", "lc =", lc), 
+      outer = TRUE, cex = 0.8, line = -2)
+
+# finding dimensions
+plot_dims <- dev.size("in")
+
+plot_width_inch <- plot_dims[1]  
+plot_height_inch <- plot_dims[2] 
+
+# setting dpi
+dpi <- 300
+
+# Convert dimensions from inches to pixels
+plot_width_pixels <- plot_width_inch * dpi
+plot_height_pixels <- plot_height_inch * dpi
+
+## saving the plot
+
+# generating title and path
+plot_title = paste0(it, "random_","seed_", random_seed, "_lc_", lc)
+
+plot_path = "/Users/christianstenbro/AU/BSc/Figures and visualisations/drawing_samples/"
+
+# saving plot
+png(paste0(plot_path, plot_title, ".png"), width = plot_width_pixels, height = plot_height_pixels)
+
+# plotting
+
+  # fixing aspect ratio and setting up a grid
+  par(pty="s", mfrow=c(2,5), mar = c(5, 1, 1, 1))
+  
+  # plotting drawings with computations for all features 
+  for (i in 1:n) {
+    
+    ID_p <- ID$participant.label[i]
+          
+    lc = sample(1:6,1)
+           
+    features <- drawing_subset %>% filter(participant.label == ID_p, line_count == lc)
+    
+    drawing <- angle_data %>% filter(participant.label == ID_p, line_count == lc)
+    
+    intersections <- find_intersections(drawing)
+  
+    # plotting the lines
+    plot(st_geometry(intersections[1]$lines_sf), col = "blue", lwd = 6, xlim = c(0, 400), ylim = c(0, 400),
+         #main = paste(unique(features$line_count), "line drawing by participant", unique(features$participant.label)),
+         # sub = paste("intersection count = ", features$intersection_count,
+         #             "\nmean horizontality = ", round(features$cosine_similarity_h, 3),
+         #             "\nline similarity = ", round(features$abs_avg_between_line_cosine_sim, 3)),
+         )
+    
+    mtext(paste("intersection count = ", features$intersection_count,
+                     "\nmean horizontality = ", round(features$cosine_similarity_h, 3),
+                     "\nline similarity = ", round(features$abs_avg_between_line_cosine_sim, 3)), 
+          side = 1, line = 7, cex = 1.6)
+      
+    # plotting the intersection if it exists
+    # intersection_coords <- st_coordinates(intersections[2]$intersection_points)
+    # points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 4)
+      
+    # creating legend  
+    #legend("topright", legend = "Intersection(s)", col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 0.8)
+    
+    # plotting the 'canvas' limits  
+    box()
+  }
+
+mtext(paste("10 random drawings (n =", nrow(drawing_subset),") ;", "lc =", lc), 
+      outer = TRUE, cex = 2, line = -4)
+  
+dev.off()
+```
+
+```{r}
+# plotting drawings with computations for all features 
+
+for (i in 1:40) {
+  
+  drawing <- angle_data %>% filter(participant.label == participant_ids[i], line_count == 2)
+  features <- feature_data_set %>% filter(participant.label == participant_ids[i], line_count == 2)
+  intersections <- find_intersections(drawing)
+  ID <- unique(drawing$participant.label)
+    
+  # plotting the lines
+  plot(st_geometry(intersections[1]$lines_sf), col = "blue", lwd = 2,
+       main = paste(unique(features$line_count), "line drawing by participant", unique(features$participant.label)),
+       sub = paste("intersection count = ", features$intersection_count,
+                   "\nmean horizontality = ", round(features$cosine_similarity_h, 3),
+                   "\nbetween line abs. cosine similarity = ", round(features$abs_avg_between_line_cosine_sim, 3))
+       )
+    
+  # plotting the intersection if it exists
+  if (features$intersection_count < 0){
+    intersection_coords <- st_coordinates(intersections[2]$intersection_points)
+    points(intersection_coords[,1], intersection_coords[,2],col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 1.5)
+    legend("topright", legend = "Intersection(s)", col = col.alpha("orange", alpha = 0.8), pch = 19, cex = 0.8)
+  }
+  
+}
+```
+
+
+## 5.3 Plotting distributions of the different features
+
+### 5.3.1 Horizontality plots
+
+Decomposed:
+
+```{r}
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/densities/"
+
+file_name = paste0(path_name, "horizontality.tiff")
+
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+alpha = 0.7
+
+par(mfrow = c(2,3), mar = c(4, 2, 2, 2))
+
+# first, we loop through the line count variable
+
+for (i in 1:6) {
+  
+  subset <- feature_data_set %>% filter(line_count == i)
+  
+  # creates the plot with a single
+  plot(density(subset[subset$macroarea == macroarea_idx[1], 'cosine_similarity_h'], bw = "SJ", adjust = 3, from = 0, to = 1), 
+       ylim = c(0,6), 
+       col = col.alpha(1, alpha), main = "", xlab = "")
+  title(main = paste("line count =",i), cex.main = 1, line = 0.3)
+  
+  for (j in 2:6) {
+    
+    lines(density(subset[subset$macroarea == macroarea_idx[j], 'cosine_similarity_h'], bw = "SJ", adjust = 3, from = 0, to = 1), 
+          col = col.alpha(j, alpha))
+  }
+  
+}
+
+# legend("center", legend = macroarea_idx[1:6], 
+#        col = c(1:6), lwd = 2, bty = "n", cex = 1)
+
+#mtext("Horizontality for different line counts", outer = TRUE, cex = 1, line = -2)
+
+dev.off()
+```
+
+Aggregated:
+
+```{r}
+par(mfrow=c(2,3), mar = c(4, 2, 2, 2))
+
+for (i in 1:6) {
+  sub <- feature_data_set %>% filter(line_count == i) %>% select(cosine_similarity_h) 
+  plot(density(sub$cosine_similarity_h, bw = "SJ", adjust = 4), main = "", ylim = c(0,11))
+  title(main = paste(i, " lines"), cex.main = 0.8, line = 0.3)
+}
+#mtext("Horizontality for different line counts", outer = TRUE, cex = 1, line = -2)
+```
+
+### 5.3.2 Line similarity plots
+
+Aggregated:
+
+```{r}
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/densities/"
+
+file_name = paste0(path_name, "similarity.tiff")
+
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+par(mfrow=c(2,3), mar = c(4, 2, 2, 2))
+
+for (i in 2:6) {
+  sub <- consine_similarity_drawing_level %>% filter(line_count == i) %>% select(cosine_similarity_mean) 
+  dens(sub$cosine_similarity_mean)
+  title(main = paste(i, " lines"), cex.main = 0.8, line = 0.3)
+}
+#mtext("Between line cosine similarity for different line counts", outer = TRUE, cex = 1, line = -2)¨
+
+dev.off()
+```
+
+All macro areas for a single line count level:
+
+```{r}
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/densities/"
+
+file_name = paste0(path_name, "similarity_5_lines.tiff")
+
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+
+# removing NAs
+subset <- feature_data_set %>% filter(abs_avg_between_line_cosine_sim != "NA")
+
+par(mfrow=c(2,3), mar = c(4, 2, 2, 2))
+
+# first, select a line count subset
+
+lc = 5
+
+for (j in 1:6) {
+
+  subset <- feature_data_set %>% filter(line_count == lc)
+  
+  # create a plot for the first line
+
+  plot(density(subset[subset$macroarea == macroarea_idx[j], 'abs_avg_between_line_cosine_sim'], bw = "SJ", adjust = 3, from = 0, to = 1), 
+       col = j, main = "", xlab = "")
+  
+  title(main = macroarea_idx[j], cex.main = 1, line = 0.3)
+  
+  # then add the lines for the other macro_areas
+  
+}
+
+dev.off()
+```
+
+Unused stuff:
+
+```{r}
+# removing NAs
+subset <- feature_data_set %>% filter(abs_avg_between_line_cosine_sim != "NA")
+
+# first, select a line count subset
+
+for (i in 1:6) {
+
+  subset <- feature_data_set %>% filter(macroarea == macroarea_idx[i])
+  
+  # create a plot for the first line
+
+  plot(density(subset[subset$line_count == 2, 'abs_avg_between_line_cosine_sim']), 
+       col = col.alpha(1, alpha), main = "", xlab = "", ylim = c(0,100))
+  
+  # then add the lines for the other macro_areas
+  
+  for (j in 2:6) {
+    
+    lines(density(subset[subset$line_count == j, 'abs_avg_between_line_cosine_sim']), 
+          col = col.alpha(j, alpha))
+    
+  }
+
+    title(main = paste("area =",i), cex.main = 1, line = 0.3)
+  
+}
+
+
+```
+
+```{r}
+# removing NAs
+subset <- feature_data_set %>% filter(abs_avg_between_line_cosine_sim != "NA")
+
+par(mfrow=c(2,3), mar = c(4, 2, 2, 2))
+
+# first, select a line count subset
+
+for (i in 2:6) {
+
+  subset <- feature_data_set %>% filter(line_count == i)
+  
+  # create a plot for the first line
+
+  plot(density(subset[subset$macroarea == macroarea_idx[1], 'abs_avg_between_line_cosine_sim'], bw = "SJ", adjust = 1, from = 0, to = 1), 
+       col = col.alpha(1, alpha), main = "", xlab = "", ylim=c(0,1000))
+  
+  title(main = paste("line count =",i), cex.main = 1, line = 0.3)
+  
+  # then add the lines for the other macro_areas
+  
+  for (j in 2:6) {
+    
+    lines(density(subset[subset$macroarea == macroarea_idx[j], 'abs_avg_between_line_cosine_sim'], bw = "SJ", adjust = 1, from = 0, to = 1), 
+          col = col.alpha(j, alpha))
+    
+  }
+  
+}
+
+#legend("center", legend = macroarea_idx[1:6], col = c(1:6), lwd = 2, bty = "n", cex = 1)
+
+```
+
+### 5.3.3 Intersection plots
+
+```{r}
+for (i in 2:6) {
+  
+  subset <- feature_data_set %>% filter(line_count == i)
+  
+  plot <- ggplot(data = subset, aes(x=intersection_count, fill=macroarea)) + 
+    geom_bar(alpha=1, position="dodge", show.legend = FALSE) +
+    theme_minimal() +
+    labs(title = paste("Line count =", i)) +
+    scale_x_continuous(breaks = seq(0, 15, by = 1))
+  
+  print(plot)
+}
+
+```
+
+# 6 Fitting statistical models
+
+## 6.1 Modelling Intersections
+
+The first model I will fit is a poisson distribution of the intersection count, taking an interaction between the (ordered categorical?) line count and the (categorical) macro area.
+
+The variables will be defined as:
+
+  I = intersection count
+  L = line count
+  M = macro area
+
+Formally, the model can be specified as:
+
+$$I \sim Poisson(\lambda_i)$$
+$$\log{\lambda_i} = 0 + \beta_L L_i + \beta_M[M_i] + \beta_{LM}[M_i] \cdot L_i $$
+The intercept is here forced to 0 to ease the interpretation of the coefficients for the different levels in the categorical predictors: The coefficients will correspond to the mean of log lambda for each category.
+
+Before fitting the model, I will do prior predictive checks (based on McElreath, 2020, ch. 11). I will use the same uninformative prior for all three coefficients: A gaussian that allows for moderate slopes in both positive and negative directions:
+
+$$ \beta \ \text{priors} \sim N(0,0.5)$$
+To see the effect of this prior, I will sample coefficient values from the above prior distribution, simulate different categorical levels, and take the exponential of the product of the coefficients and different levels to estimate the prior prediction on the outcome (non-log) scale:
+
+```{r}
+# setting up simulation
+N = 1000
+b <- rnorm(N, 0 , 0.5 )
+lambda = exp(b)
+
+# setting up plotting window
+par(mfrow=c(1, 2))
+
+# plotting beta values and the effect on lambda on the outcome scale
+plot(x = b, y = lambda, main = "(a) sampled beta coefficients \nand their effect on lambda",
+     cex.main = 0.8, col = col.alpha(rangi2, 0.3))
+grid()
+abline(h = mean(lambda), lty = 2 , lwd = 1)
+
+# plotting the distribution of lambda
+dens(lambda, main = "(b) distribution of differences lambda",
+     cex.main = 0.8)
+abline(v = mean(lambda), lty = 2 , lwd = 1)
+```
+
+Comment on the plot:
+
+Considering that this is the expected change in lambda (both the mean, or expected value, and the variance of the Poisson distribution) for a single change in category, the possible values for beta cover a broad range. It is unlikely that changing macro area or line count would affect the average intersection count with more than a few units (even this would be an unexpectedly large effect).
+
+As a note, it is important to consider that the line count is an ordered categorical variable. There are three ways to deal with this: One is to code it as a categorical variable without taking the order into account; another is to code it as a continuous variable (which adds the assumption that the levels are equidistant, which they arguably are in this case); a third is to code the variable as an ordered categorical variable (for example following the approach in McElreath, 2020, ch. 12).
+
+As a first try, I will code it as a continuous variable, as I believe it is sound to assume that the levels are equidistant (the distance between 1 line and 2 lines are the same as that between 2 and 3 lines, etc).
+
+Notice that the beta coefficients will still be interpretable in the same way; beta tells us the expected difference in log lambda for a unit change in the line count variable.
+
+Now to format the data and specify the model in ULAM:
+
+```{r}
+# checking the factor levels
+levels(feature_data_set$macroarea)
+
+# renaming data
+d <- feature_data_set
+```
+
+```{r}
+# setting up a data list for ULAM
+# dat <- list(
+#   I = d$intersection_count,
+#   L = d$line_count,
+#   M = as.integer(d$macroarea),
+#   P = as.integer(factor(d$participant.label))
+#   )
+# 
+# # approximating posterior
+# ulam_m1.4 <- ulam(
+#   alist(
+#     I ~ dpois( lambda ),
+#     log(lambda) <- 0 + b_L*L + b_M[M] + b_LM[M]*L + a[P],
+#     b_L ~ dnorm(0,0.5),
+#     b_M[M] ~ dnorm(0,0.5),
+#     b_LM[M] ~ dnorm(0,0.5),
+#     a[P] ~ dnorm(0,0.5)
+#   ), data = dat , chains=4 , log_lik = TRUE, cmdstan = TRUE, cores = 4
+# )
+```
+
+```{r}
+# # assessing the model
+# precis(ulam_m1.4, depth = 2)
+# 
+# # extracting posterior and coefficients
+# post <- extract.samples( ulam_m1.4 )
+# 
+# # printing the factor levels
+# levels(feature_data_set$macroarea)
+```
+
+Trying to fit the same model in brms:
+
+```{r}
+# setting up a data frame; remove centering (doesn't make sense for line count; makes it harder to interpret)
+dat <- data.frame(
+  I = d$intersection_count,
+  L = d$line_count,
+  M = d$macroarea,
+  P = factor(as.integer(factor(d$participant.label)))
+)
+
+# fitting model
+intersection_model_5 <- brms::brm(
+  formula = I ~ 0 + M + L + L:M + (1|P),
+  data = dat,
+  family = poisson,
+  chains = 4, iter = 2000, warmup = 1000, 
+  cores = 4, seed = 2025,
+  file = "intersection_model_5"
+)
+
+summary(intersection_model_5)
+```
+
+```{r}
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+
+file_name = paste0(path_name, "intersection_coef_table.tiff")
+
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# plotting the coefficients as a forest plot
+posterior <- as_draws_df(intersection_model_5)
+
+# Plot intervals for all fixed effects
+mcmc_intervals(posterior, regex_pars = "^b_")  # Plot for all fixed effects
+
+dev.off()
+```
+
+
+<!-- # ```{r} -->
+<!-- # # plotting the posteriors -->
+<!-- # dens(post$b_L) -->
+<!-- # dens(post$b_LM) -->
+<!-- #  -->
+<!-- # # plotting the estimated coefficients for the interaction term -->
+<!-- # par(mfrow=c(2,3)) -->
+<!-- #  -->
+<!-- # for (i in 1:6) { -->
+<!-- #   dens(post$b_LM[,i], main = paste(levels(intersection_prolific_geography$macroarea)[i]), cex.main = 0.5) -->
+<!-- #   abline(v = median(post$b_LM[,i])) -->
+<!-- # } -->
+<!-- #  -->
+<!-- # par(mfrow=c(1,1)) -->
+<!-- #  -->
+<!-- # # plotting the coefficients as box plots -->
+<!-- # boxplot_data <- rbind( -->
+<!-- # data_frame(group = rep(1,2000), lambda = as.vector(post$b_LM[,1])), -->
+<!-- # data_frame(group = rep(2,2000), lambda = as.vector(post$b_LM[,2])), -->
+<!-- # data_frame(group = rep(3,2000), lambda = as.vector(post$b_LM[,3])), -->
+<!-- # data_frame(group = rep(4,2000), lambda = as.vector(post$b_LM[,4])), -->
+<!-- # data_frame(group = rep(5,2000), lambda = as.vector(post$b_LM[,5])), -->
+<!-- # data_frame(group = rep(6,2000), lambda = as.vector(post$b_LM[,6]))) -->
+<!-- #  -->
+<!-- # path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/" -->
+<!-- # file_name = paste0(path_name, "intersection_b_LM.tiff") -->
+<!-- # tiff(file_name, units="in", width=7.29, height=4.51, res=500) -->
+<!-- #  -->
+<!-- # boxplot(boxplot_data$lambda ~ boxplot_data$group, ylab = "b_LM", xlab = "index", col = c(2,3,4,5,6,7)) -->
+<!-- # #legend("bottomright", legend = c("Africa","Australia","Eurasia","North America","Papunesia","South America"), col = c(2,3,4,5,6,7), lwd = 2, bty = "n", cex = 0.6) -->
+<!-- #  -->
+<!-- # dev.off() -->
+<!-- #  -->
+<!-- # boxplot(boxplot_data$lambda ~ boxplot_data$group, ylab = "b_LM", xlab = "index", col = c(2,3,4,5,6,7)) -->
+<!-- # ``` -->
+<!-- # ```{r} -->
+<!-- # # plotting the coefficients as box plots -->
+<!-- # boxplot_data <- rbind( -->
+<!-- # data_frame(group = rep(1,2000), lambda = as.vector(post$b_M[,1])), -->
+<!-- # data_frame(group = rep(2,2000), lambda = as.vector(post$b_M[,2])), -->
+<!-- # data_frame(group = rep(3,2000), lambda = as.vector(post$b_M[,3])), -->
+<!-- # data_frame(group = rep(4,2000), lambda = as.vector(post$b_M[,4])), -->
+<!-- # data_frame(group = rep(5,2000), lambda = as.vector(post$b_M[,5])), -->
+<!-- # data_frame(group = rep(6,2000), lambda = as.vector(post$b_M[,6]))) -->
+<!-- #  -->
+<!-- # path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/" -->
+<!-- # file_name = paste0(path_name, "intersection_b_M.tiff") -->
+<!-- # tiff(file_name, units="in", width=7.29, height=4.51, res=500) -->
+<!-- #  -->
+<!-- # boxplot(boxplot_data$lambda ~ boxplot_data$group, ylab = "b_M", xlab = "index", col = c(2,3,4,5,6,7)) -->
+<!-- # legend("bottomright", legend = c("Africa","Australia","Eurasia","North America","Papunesia","South America"), col = c(2,3,4,5,6,7), lwd = 2, bty = "n", cex = 0.6) -->
+<!-- #  -->
+<!-- # dev.off() -->
+<!-- #  -->
+<!-- # boxplot(boxplot_data$lambda ~ boxplot_data$group, ylab = "b_M", xlab = "index", col = c(2,3,4,5,6,7)) -->
+<!-- # legend("bottomright", legend = c("Africa","Australia","Eurasia","North America","Papunesia","South America"), col = c(2,3,4,5,6,7), lwd = 2, bty = "n", cex = 0.6) -->
+<!-- # ``` -->
+<!-- # ```{r} -->
+<!-- # path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/" -->
+<!-- # file_name = paste0(path_name, "intersection_b_L.tiff") -->
+<!-- # tiff(file_name, units="in", width=7.29, height=4.51, res=500) -->
+<!-- #  -->
+<!-- # # plotting the line count coefficient -->
+<!-- # dens(post$b_L, main = "b_L") -->
+<!-- # abline(v = median(post$b_L)) -->
+<!-- # abline(v = HPDI(post$b_L)[1], lty = 2) -->
+<!-- # abline(v = HPDI(post$b_L)[2], lty = 2) -->
+<!-- #    -->
+<!-- # dev.off() -->
+<!-- #  -->
+<!-- # dens(post$b_L, main = "b_L") -->
+<!-- # abline(v = median(post$b_L)) -->
+<!-- # abline(v = HPDI(post$b_L)[1], lty = 2) -->
+<!-- # abline(v = HPDI(post$b_L)[2], lty = 2) -->
+<!-- # ``` -->
+
+### 6.1.1 Posterior predictive checks
+
+```{r}
+post_check_int_a <- brms::pp_check(intersection_model_5, ndraws = 100, type = "bars")
+post_check_int_b <- brms::pp_check(intersection_model_5, ndraws = 100, type = "bars_grouped", group = "M")
+post_check_int_c <- brms::pp_check(intersection_model_5, ndraws = 100, type = "violin_grouped", group = "M")
+
+post_check_int_a
+post_check_int_b
+post_check_int_c
+```
+
+### 6.1.2 Conditional effects
+
+```{r}
+c(levels(d$macroarea))
+```
+
+```{r}
+# setting up file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+file_name = paste0(path_name, "intersection_ce_interaction.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# Plotting the interaction
+ce <- brms:::conditional_effects(intersection_model_5, effects = "L:M")
+ce_plot <- plot(ce, plot = FALSE)[["L:M"]]
+
+ce_plot +
+  labs(
+    title = "Intersection Model Conditional Effects: Interaction",
+    y = "Expected Avg. Intersections",
+    x = "Line Count"
+  ) +
+    theme(
+      axis.text = element_text(size = 7)
+    )
+
+dev.off()
+
+# setting up file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+file_name = paste0(path_name, "intersection_ce_macroarea.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# Plotting the effect of macro area on its own
+ce_box <- brms:::conditional_effects(intersection_model_5, effects = "M")
+ce_boxplot <- plot(ce_box, plot = FALSE)[["M"]]
+
+ce_boxplot +
+  labs(
+    title = "Intersection Model Conditional Effects: Macroarea",
+    y = "Expected Avg. Intersections",
+    x = "Macroarea") +
+    theme(
+      axis.text = element_text(size = 7)
+    )
+
+dev.off()
+```
+### 6.1.3 Bayesian R-squared
+
+```{r}
+set.seed(seed = 2025)
+R2 <- rstantools::bayes_R2(intersection_model_5)
+looR2 <- rstantools::loo_R2(intersection_model_5)
+
+R2
+round(looR2, 3)
+```
+
+
+## 6.2 Modelling Horizontality
+
+```{r}
+# setting up the data frame
+dat <- data.frame(
+  CS_h = feature_data_set$cosine_similarity_h * (feature_data_set$cosine_similarity_h * (nrow(feature_data_set) - 1) + 0.5) / nrow(feature_data_set), # scaling the cosine similarities so that all values x meet the following condition: 0 < x < 1
+  M = factor(feature_data_set$macroarea),
+  L = feature_data_set$line_count,
+  P = factor(as.integer(factor(feature_data_set$participant.label))) # converting PIDs to integers
+)
+```
+
+```{r}
+# fitting a model with random effects
+mdl_4_6_g <- brms::brm(
+  bf(CS_h ~ 0 + L + M + L*M + (1|P),
+     phi ~ 0 + L + M),
+  data = dat,
+  family = Beta(),
+  chains = 4, iter = 2000, warmup = 1000, 
+  cores = 4, seed = 2025,
+  file = "mdl_4_6_g"
+)
+
+# checking the summary
+summary(mdl_4_6_g)
+```
+
+Alternative formula:
+
+```{r}
+# # fitting a model with random effects
+# mdl_4_6_g_a <- brms::brm(
+#   bf(CS_h ~ 0 + L + M + L:M + (1|P),
+#      phi ~ 0 + L + M),
+#   data = dat,
+#   family = Beta(),
+#   chains = 4, iter = 2000, warmup = 1000, 
+#   cores = 4, seed = 2025,
+#   file = "mdl_4_6_g_a"
+# )
+# 
+# # checking the summary
+# summary(mdl_4_6_g_a)
+```
+
+
+```{r}
+# Extract posterior draws
+posterior <- as_draws_df(mdl_4_6_g)
+
+# Plot intervals for all fixed effects
+mcmc_intervals(posterior, regex_pars = "^b_")  # Plot for all fixed effects
+
+# saving file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+
+file_name = paste0(path_name, "horizontality_coef_table.tiff")
+
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+mcmc_intervals(posterior, regex_pars = "^b_")
+
+dev.off()
+```
+### 6.2.1 Posterior predictive checks
+
+Trying posterior predictive checks:
+
+```{r}
+pp_check_6.2.a <- brms::pp_check(mdl_4_6_g, ndraws = 100)
+pp_check_6.2.a
+```
+This is honestly not that bad! The bimodal nature of the data is captured by the beta model, balancing the fact that the peak at 1 (indicating horizontal lines) is bigger than the peak at 0 (verticality). However, the model does not (and theoretically, cannot) take the multimodal nature of the actual distribution into account. Hence, the meaningful variation between 1 and 0 is all lost in this model.
+
+I will make a similar plot where the regional groups are incorporated:
+
+```{r}
+pp_check_6.2.b <- brms::pp_check(mdl_4_6_g, ndraws = 100, type = "violin_grouped", group = "M")
+pp_check_6.2.c <- brms::pp_check(mdl_4_6_g, ndraws = 100, type = "dens_overlay_grouped", group = "M")
+
+pp_check_6.2.b
+pp_check_6.2.c
+```
+It is clear (especially from plot pp_check_6.2.c) that the model fails to capture the variation in everything that's going on between the peaks. 
+
+As such, the model can only be used to describe the differences in the relative distribution of the two peaks (horizontality and verticality), while differences in whatever is between the peaks (and there *are* clear meaningful differences based on the above plot, and the visualisations in point 5) is left undebscribed.
+
+### 6.2.2 Conditional effects
+
+```{r}
+# Plotting the interaction
+brms:::conditional_effects(mdl_4_6_g, effects = "L:M")
+
+# Plotting the effect of macro area on its own
+#conditions <- data.frame(L = c(1, 2, 3, 4, 5, 6))
+brms:::conditional_effects(mdl_4_6_g, effects = "M") 
+
+
+ce <- brms:::conditional_effects(mdl_4_6_g, effects = "L:M")
+ce_plot <- plot(ce, plot = FALSE)[["L:M"]]
+
+ce_plot +
+  labs(
+    title = "Horizontality Model Conditional Effects: Interaction",
+    y = "Expected Horizontality",
+    x = "Line Count"
+  )
+
+ce_box <- brms:::conditional_effects(mdl_4_6_g, effects = "M") 
+ce_boxplot <- plot(ce_box, plot = FALSE)[["M"]]
+
+ce_boxplot +
+  labs(
+    title = "Horizontality Model Conditional Effects: Macroarea",
+    y = "Expected Horizontality",
+    x = "Macroarea")
+```
+```{r}
+# setting up file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+file_name = paste0(path_name, "horizontality_ce_interaction.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# Plotting the interaction
+ce <- brms:::conditional_effects(mdl_4_6_g, effects = "L:M")
+ce_plot <- plot(ce, plot = FALSE)[["L:M"]]
+
+ce_plot +
+  labs(
+    title = "Horizontality Model Conditional Effects: Interaction",
+    y = "Expected Avg. Horizontality",
+    x = "Line Count"
+  ) +
+  theme(
+      axis.text = element_text(size = 7)
+    )
+
+dev.off()
+
+# setting up file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+file_name = paste0(path_name, "horizontality_ce_macroarea.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# Plotting the effect of macro area on its own
+ce_box <- brms:::conditional_effects(mdl_4_6_g, effects = "M") 
+ce_boxplot <- plot(ce_box, plot = FALSE)[["M"]]
+
+ce_boxplot +
+  labs(
+    title = "Horizontality Model Conditional Effects: Macroarea",
+    y = "Expected Avg. Horizontality",
+    x = "Macroarea") +
+    theme(
+      axis.text = element_text(size = 7)
+    )
+
+dev.off()
+```
+### 6.2.3 Bayesian R-squared
+
+```{r}
+set.seed(seed = 2025)
+R2 <- rstantools::bayes_R2(mdl_4_6_g)
+looR2 <- rstantools::loo_R2(mdl_4_6_g)
+
+R2
+round(looR2, 3)
+```
+
+
+## 6.3 Modelling Similarity
+
+### 6.3.1 Conceptualising model
+
+I will use the parameterisation of the beta distribution used in McElreath (2020), ch. 12, and further described here: https://bookdown.org/content/4857/monsters-and-mixtures.html
+
+McElreath writes the following about the parameters:
+
+"A beta distribution has two parameters, *an average probability pbar* and *a shape parameter thetaØ. The shape parameter theta describes how spread out the distribution is. When theta = 2, every probability from zero to 1 is equally likely. As theta increases above 2, the distribution of probabilities grow more concentrated. When theta < 2, the distribution is so dispersed that extreme probabilities near zero and 1 are more likely than the mean." (McElreath, 2020, p. 371)
+
+Trying out different parameters of a beta distribution:
+
+```{r}
+# different values for pbar with fixed theta
+pbar <- seq(from = 0, to = 1, by = 1/6)
+theta <- 5
+
+par(mfrow=c(2,3))
+
+for (i in 1:6) {
+curve( dbeta2(x,pbar[i],theta) , from=0 , to=1 ,
+       xlab="probability" , ylab="Density", main = paste("pbar =", round(pbar[i], 3)))
+}
+
+# different values for theta with fixed pbar 
+theta <- seq(from = 0, to = 6, by = 6/6)
+pbar <- 0.5
+
+par(mfrow=c(2,3))
+
+for (i in 1:6) {
+curve( dbeta2(x,pbar,theta[i]) , from=0 , to=1 ,
+       xlab="probability" , ylab="Density", main = paste("theta =", round(theta[i], 3)))
+}
+
+```
+
+```{r}
+curve( dbeta2(x,0.7, 0.8) , from=0 , to=1 ,
+       xlab="probability" , ylab="Density")
+```
+
+
+The following visualisation from https://bookdown.org/content/4857/monsters-and-mixtures.html is also super neat. Here, the pbar value is expressed mu and the theta as kappa:
+
+```{r}
+crossing(pbar  = c(.25, .5, .75),
+         theta = c(5, 15, 30)) %>% 
+  expand_grid(x = seq(from = 0, to = 1, length.out = 100)) %>% 
+  mutate(density = rethinking::dbeta2(x, prob = pbar, theta = theta),
+         mu      = str_c("mu == ", pbar %>% str_remove(., "0")),
+         kappa   = factor(str_c("kappa == ", theta), 
+                          levels = c("kappa == 30", "kappa == 15", "kappa == 5"))) %>% 
+  
+  # plot
+  ggplot(aes(x = x, y = density)) +
+  geom_area(fill = canva_pal("Green fields")(4)[4]) +
+  scale_x_continuous("probability space", 
+                     breaks = c(0, .5, 1), labels = c("0", ".5", "1")) +
+  scale_y_continuous(NULL, labels = NULL) +
+  theme(axis.ticks.y = element_blank()) +
+  facet_grid(kappa ~ mu, labeller = label_parsed)
+```
+
+The variables of the model are defined: 
+
+CS = cosine similarity mean
+M = macro area
+L = line count
+P = participant
+
+The model is defined:
+
+$$ CS_i \sim Beta(\bar{p}_i, \theta)$$
+$$ \log \bar{p}_i = 0 + \beta_{M[i]} + \beta_L L_i + \beta_{LM[i]} L_i + \alpha_{P[i]} $$
+$$ \beta_{[M, L, LM]} \sim \text{some prior} $$
+$$ \alpha_P \sim \text{some prior} $$
+$$ \theta \sim \text{some prior} $$
+The model is working on the level of the individual drawing, meaning that it is possible to investigate potential systematic variation in the mean cosine similarity as a interactive function of the line count and the geographic region. 
+
+I will need to decide on priors for the beta coefficients, the alpha coefficients, and the theta parameter.
+
+### 6.3.2 Prior predictive checks
+
+### 6.3.3 Fitting model
+
+```{r}
+dat <- data.frame(
+  CS = feature_data_set$abs_avg_between_line_cosine_sim * (feature_data_set$abs_avg_between_line_cosine_sim * (nrow(feature_data_set) - 1) + 0.5) / nrow(feature_data_set),
+  M = factor(feature_data_set$macroarea),
+  L = feature_data_set$line_count,
+  P = factor(as.integer(factor(feature_data_set$participant.label)))
+)
+
+# mdl_6_2_a <- rstanarm::stan_betareg(CS ~ 0 + L + M + M*L, data = dat, link = "logit", link.phi = "log",
+#                      cores = 4, seed = 2025)
+
+mdl_6_2_b <- brms::brm(
+  bf(CS ~ 0 + L + M + L*M + (1|P),
+     phi ~ 0 + L + M),
+  data = dat,
+  family = Beta(),
+  chains = 4, iter = 2000, warmup = 1000, 
+  cores = 4, seed = 2025,
+  file = "mdl_6_2_b"
+)
+
+summary(mdl_6_2_b)
+```
+
+```{r}
+# Extract posterior draws
+posterior <- as_draws_df(mdl_6_2_b)
+
+# Plot intervals for all fixed effects
+mcmc_intervals(posterior, regex_pars = "^b_")  # Plot for all fixed effects
+
+# saving file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+
+file_name = paste0(path_name, "similarity_coef_table.tiff")
+
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+mcmc_intervals(posterior, regex_pars = "^b_")
+
+dev.off()
+```
+### 6.3.4 Posterior predictive checks
+
+```{r}
+pp_check_6.3.a <- brms::pp_check(mdl_6_2_b, ndraws = 100)
+pp_check_6.3.a
+```
+
+```{r}
+pp_check_6.3.b <- brms::pp_check(mdl_6_2_b, ndraws = 100, type = "violin_grouped", group = "M")
+pp_check_6.3.c <- brms::pp_check(mdl_6_2_b, ndraws = 100, type = "dens_overlay_grouped", group = "M")
+pp_check_6.3.d <- brms::pp_check(mdl_6_2_b, ndraws = 100, type = "ecdf_overlay_grouped", group = "M")
+
+pp_check_6.3.b
+pp_check_6.3.c
+pp_check_6.3.d
+```
+
+### 6.3.5 Conditional effects
+
+```{r}
+# conditions <- brms::make_conditions(mdl_6_2_b, "M")
+# 
+# conditions <- data.frame(L = c(1, 2, 3, 4, 5, 6))
+```
+
+
+```{r}
+#brms:::conditional_effects(mdl_6_2_b, effects = "L:M", conditions = conditions)
+
+brms:::conditional_effects(mdl_6_2_b, effects = "L:M")
+brms:::conditional_effects(mdl_6_2_b, effects = "M")
+```
+```{r}
+# setting up file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+file_name = paste0(path_name, "similarity_ce_interaction.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# Plotting the interaction
+ce <- brms:::conditional_effects(mdl_6_2_b, effects = "L:M")
+ce_plot <- plot(ce, plot = FALSE)[["L:M"]]
+
+ce_plot +
+  labs(
+    title = "Similarity Model Conditional Effects: Interaction",
+    y = "Expected Avg. Similarity",
+    x = "Line Count"
+  ) +
+    theme(
+      axis.text = element_text(size = 7)
+    )
+
+dev.off()
+
+# setting up file
+path_name = "/Users/christianstenbro/AU/BSc/Figures and visualisations/models/"
+file_name = paste0(path_name, "similarity_ce_macroarea.tiff")
+tiff(file_name, units="in", width=7.29, height=4.51, res=500)
+
+# Plotting the effect of macro area on its own
+ce_box <- brms:::conditional_effects(mdl_6_2_b, effects = "M")
+ce_boxplot <- plot(ce_box, plot = FALSE)[["M"]]
+
+ce_boxplot +
+  labs(
+    title = "Similarity Model Conditional Effects: Macroarea",
+    y = "Expected Avg. Similarity",
+    x = "Macroarea") +
+    theme(
+      axis.text = element_text(size = 7)
+    )
+
+dev.off()
+```
+
+### 6.3.6 Bayesian R-squared
+
+```{r}
+set.seed(seed = 2025)
+R2 <- rstantools::bayes_R2(mdl_6_2_b)
+looR2 <- rstantools::loo_R2(mdl_6_2_b)
+
+R2
+round(looR2, 3)
+```
+

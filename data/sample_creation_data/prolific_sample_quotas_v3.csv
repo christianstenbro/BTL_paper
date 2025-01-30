@@ -1,0 +1,22 @@
+country_name,country_id,pool_size,macroarea,longitude,latitude,macroarea_name,participant_quota,participant_quota_percentage,participant_number
+Australia,AU,3184,Australia,134.0227717,-25.69733767,Australia,0.165,16.5,330
+Austria,AT,339,Eurasia,13.79777836,47.63185827,Eurasia,0.028,2.8,56
+Brazil,BR,509,South America,-54.35520661,-11.52463042,South America,0.084,8.4,168
+Canada,CA,5743,North America,-98.41680518,57.55048004,North America,0.056,5.6,112
+Chile,CL,752,South America,-70.76863432,-37.82938283,South America,0.083,8.3,166
+Ghana,GH,206,Africa,-1.219233363,7.945304672,Africa,0.033,3.3,66
+Indonesia,ID,230,Papunesia,113.9653825,0.1559198,Papunesia,0.042,4.2,84
+Israel,IL,415,Eurasia,35.02792347,31.51354222,Eurasia,0.027,2.7,54
+Kenya,KE,441,Africa,37.95309411,0.689918232,Africa,0.033,3.3,66
+Korea,KR KP,277,Eurasia,127.7622455,36.40238671,Eurasia,0.028,2.8,56
+Malaysia,MY,210,Papunesia,114.633303,3.671660856,Papunesia,0.042,4.2,84
+Mexico,MX,2668,North America,-101.5539973,23.87436068,North America,0.056,5.6,112
+New Zealand,NZ,810,Papunesia,170.6903554,-43.82765433,Papunesia,0.042,4.2,84
+Nigeria,NG,1336,Africa,8.147714845,9.61029352,Africa,0.034,3.4,68
+Pakistan,PK,327,Eurasia,69.08835091,30.11618837,Eurasia,0.028,2.8,56
+Philippines,PH,606,Papunesia,121.8220894,15.58654225,Papunesia,0.041,4.1,82
+Russian Federation,RU,239,Eurasia,98.67049907,59.03943421,Eurasia,0.028,2.8,56
+South Africa,ZA,10946,Africa,24.75252746,-28.55361931,Africa,0.034,3.4,68
+United States,US,78692,North America,-96.33161661,38.82080892,North America,0.055,5.5,110
+Vietnam,VN,253,Eurasia,105.9133883,16.51734717,Eurasia,0.028,2.8,56
+Zimbabwe,ZW,815,Africa,29.71782964,-18.92700122,Africa,0.033,3.3,66
